@@ -33,7 +33,6 @@ impl CommandRegistry {
 pub fn builtin_registry() -> CommandRegistry {
     let mut r = CommandRegistry::new();
 
-    // IMPORTANT: use the public re-exports from ops/mod.rs, not private submodules.
     r.register("zero", ops::cmd_zero as CommandFn);
     r.register("new", ops::cmd_new as CommandFn);
     r.register("erase", ops::cmd_erase as CommandFn);
@@ -81,6 +80,16 @@ pub fn execute_transfer_list(
         );
     }
 
+    // Compute precise total for progress: sum of all target_ranges blocks
+    // across commands that will actually be executed.
+    let progress_total: u64 = list
+        .commands
+        .iter()
+        .skip(start)
+        .map(|c| c.target_ranges.as_ref().map_or(0, |r| r.blocks()))
+        .sum();
+    ctx.progress.set_total(progress_total);
+
     for (i, cmd) in list.commands.iter().enumerate().skip(start) {
         ctx.progress
             .set_stage(&format!("[{}/{}] {}", i + 1, total, cmd.cmd_type.as_str()));
@@ -99,10 +108,9 @@ pub fn execute_transfer_list(
             .as_ref()
             .map_or(0, |r: &RangeSet| r.blocks());
         ctx.progress.advance(processed);
-
-        // NOTE: If your update.rs implements last_command_file writing, it likely does it there.
-        // We intentionally do not update resume state here unless your project requires it.
     }
+
+    ctx.progress.finish();
 
     Ok(())
 }

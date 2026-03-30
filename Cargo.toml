@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["KawaiiSparkle"]
 description = "Rust reimplementation of Android imgpatchtools"
-license = "Apache-2.0"
+license = "GPL-3.0"
 
 [profile.release]
 opt-level = 3
@@ -15,17 +15,18 @@ panic = "abort"
 
 [dependencies]
 anyhow      = "1"
-thiserror   = "1"
+thiserror   = "2"
 clap        = { version = "4", features = ["derive"] }
 flate2      = { version = "1", features = ["zlib"], default-features = false }
-sha1        = "0.10"
-sha2        = "0.10"
+sha1        = "0.11"
+sha2        = "0.11"
 hex         = "0.4"
 memmap2     = "0.9"
-bzip2       = "0.4"
-brotli      = "7"
+bzip2       = "0.6"
+brotli      = "8"
+xz2         = "0.1"
 byteorder   = "1"
-indicatif   = "0.17"
+indicatif   = "0.18"
 log         = "0.4"
 env_logger  = "0.11"
 tempfile    = "3"
@@ -36,4 +37,4 @@ libz-sys    = { version = "1", features = ["static"] }
 assert_cmd         = "2"
 predicates         = "3"
 pretty_assertions  = "1"
-criterion          = { version = "0.5", features = ["html_reports"] }
+criterion          = { version = "0.8", features = ["html_reports"] }

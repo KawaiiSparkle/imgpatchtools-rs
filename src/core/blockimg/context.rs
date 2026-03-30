@@ -11,12 +11,62 @@ pub struct NewDataReader {
 
 impl NewDataReader {
     pub fn open(path: &std::path::Path) -> Result<Self> {
-        let file = File::open(path)?;
-        let reader: Box<dyn Read> = if path.extension().map_or(false, |e| e == "br") {
-            Box::new(brotli::Decompressor::new(file, 4096))
-        } else {
-            Box::new(file)
+        let (file, ext) = match File::open(path) {
+            Ok(f) => {
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                (f, ext)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Auto-fallback: check if a compressed version exists.
+                let br_path = std::path::PathBuf::from(format!("{}.br", path.display()));
+                let lzma_path = std::path::PathBuf::from(format!("{}.lzma", path.display()));
+                let xz_path = std::path::PathBuf::from(format!("{}.xz", path.display()));
+
+                if let Ok(f) = File::open(&br_path) {
+                    log::info!("auto-fallback to compressed new data: {}", br_path.display());
+                    (f, "br".to_string())
+                } else if let Ok(f) = File::open(&lzma_path) {
+                    log::info!("auto-fallback to compressed new data: {}", lzma_path.display());
+                    (f, "lzma".to_string())
+                } else if let Ok(f) = File::open(&xz_path) {
+                    log::info!("auto-fallback to compressed new data: {}", xz_path.display());
+                    (f, "xz".to_string())
+                } else {
+                    return Err(e.into());
+                }
+            }
+            Err(e) => return Err(e.into()),
         };
+
+        // Attach appropriate streaming decompressor
+        let reader: Box<dyn Read> = match ext.as_str() {
+            "br" => {
+                log::info!("using Brotli streaming decompressor for new data");
+                Box::new(brotli::Decompressor::new(file, 65536))
+            }
+            "lzma" => {
+                log::info!("using LZMA streaming decompressor for new data");
+                // xz2 wraps liblzma; new_lzma_decoder handles raw .lzma format
+                let stream = xz2::stream::Stream::new_lzma_decoder(u64::MAX)
+                    .map_err(|e| anyhow::anyhow!("failed to create LZMA decoder: {}", e))?;
+                Box::new(xz2::read::XzDecoder::new_stream(
+                    std::io::BufReader::with_capacity(65536, file),
+                    stream,
+                ))
+            }
+            "xz" => {
+                log::info!("using XZ streaming decompressor for new data");
+                Box::new(xz2::read::XzDecoder::new(
+                    std::io::BufReader::with_capacity(65536, file),
+                ))
+            }
+            _ => Box::new(file),
+        };
+
         Ok(Self { reader })
     }
 
@@ -26,24 +76,51 @@ impl NewDataReader {
         self.reader.read_exact(&mut buf)?;
         Ok(buf)
     }
+
+    /// 用于断点续传时跳过已完成命令的数据
+    pub fn skip_blocks(&mut self, count: u64, block_size: usize) -> Result<()> {
+        let mut len = (count as usize) * block_size;
+        let mut buf = vec![0u8; 65536.min(len)];
+        while len > 0 {
+            let to_read = len.min(buf.len());
+            self.reader.read_exact(&mut buf[..to_read])?;
+            len -= to_read;
+        }
+        Ok(())
+    }
 }
 
 pub struct PatchDataReader {
-    mmap: memmap2::Mmap,
+    mmap: Option<memmap2::Mmap>,
 }
 
 impl PatchDataReader {
     pub fn open(path: &std::path::Path) -> Result<Self> {
         let file = File::open(path)?;
-        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        let meta = file.metadata()?;
+
+        let mmap = if meta.len() > 0 {
+            Some(unsafe { memmap2::Mmap::map(&file)? })
+        } else {
+            log::info!("patch file {} is empty (0 bytes), skipping mmap", path.display());
+            None
+        };
+
         Ok(Self { mmap })
     }
 
     pub fn read_patch(&self, offset: u64, len: u64) -> Result<&[u8]> {
-        let start = offset as usize;
-        let end = start + (len as usize);
-        ensure!(end <= self.mmap.len(), "patch read out of bounds");
-        Ok(&self.mmap[start..end])
+        if len == 0 {
+            return Ok(&[]);
+        }
+        if let Some(ref mmap) = self.mmap {
+            let start = offset as usize;
+            let end = start + (len as usize);
+            ensure!(end <= mmap.len(), "patch read out of bounds");
+            Ok(&mmap[start..end])
+        } else {
+            anyhow::bail!("attempted to read patch data but patch file is empty");
+        }
     }
 }
 
@@ -60,6 +137,7 @@ pub struct CommandContext {
 }
 
 impl CommandContext {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         version: u32,
         block_size: usize,
@@ -92,7 +170,6 @@ impl CommandContext {
     ) -> Result<Vec<u8>> {
         let mut buffer = vec![0u8; (src_block_count as usize) * self.block_size];
 
-        // ---- 1) Fill from direct source ranges ----
         if let Some(rs) = src_ranges {
             let data = if let Some(ref s) = self.source {
                 s.read_ranges(rs)?
@@ -101,7 +178,6 @@ impl CommandContext {
             };
 
             if let Some(map) = src_buffer_map {
-                // Place `data` into `buffer` following map's block positions.
                 let mut data_off = 0usize;
                 for (start, end) in map.iter() {
                     let len = ((end - start) as usize) * self.block_size;
@@ -121,13 +197,11 @@ impl CommandContext {
                     data.len()
                 );
             } else {
-                // No map => AOSP behaviour is: fill from start.
                 ensure!(data.len() <= buffer.len(), "direct source data exceeds buffer");
                 buffer[..data.len()].copy_from_slice(&data);
             }
         }
 
-        // ---- 2) Overlay stash refs (buffer positions) ----
         for (stash_id, map_ranges) in stash_refs {
             let stash_data = self.stash.load(stash_id)?;
 

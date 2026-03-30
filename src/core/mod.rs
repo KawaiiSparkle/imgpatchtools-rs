@@ -9,3 +9,4 @@
 pub mod applypatch;
 pub mod blockimg;
 pub mod edify;
+pub mod super_img;

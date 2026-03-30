@@ -7,13 +7,15 @@ use clap::{Parser, Subcommand};
 use imgpatchtools_rs::core::applypatch::cli::ApplypatchArgs;
 use imgpatchtools_rs::core::blockimg::cli::BlockimgArgs;
 use imgpatchtools_rs::core::edify::cli::EdifyArgs;
+use imgpatchtools_rs::core::super_img::cli::{LpmakeArgs, LpdumpArgs, LpunpackArgs, SuperArgs};
 
 /// Bit-exact, high-performance Rust reimplementation of AOSP imgpatchtools.
 #[derive(Parser, Debug)]
 #[command(
     name = "imgpatchtools-rs",
     version,
-    about = "Bit-exact Rust reimplementation of AOSP imgpatchtools"
+    about = "Bit-exact Rust reimplementation of AOSP imgpatchtools",
+    arg_required_else_help(true)
 )]
 struct Cli {
     /// Enable verbose logging.
@@ -51,6 +53,29 @@ enum Commands {
 
     /// Execute an Edify updater-script.
     Edify(EdifyArgs),
+
+    /// Smart super.img builder — auto-detect partitions from workdir.
+    Super(SuperArgs),
+
+    /// Build a super.img (expert mode, like AOSP lpmake).
+    Lpmake(LpmakeArgs),
+
+    /// Dump LP metadata from a super.img (like AOSP lpdump).
+    Lpdump(LpdumpArgs),
+
+    /// Extract partition images from a super.img (like AOSP lpunpack).
+    Lpunpack(LpunpackArgs),
+
+    /// [WIP] Batch process sequential OTA packages.
+    Batch {
+        /// Path to the Full OTA zip.
+        full_ota: String,
+        /// Paths to incremental OTA zips (in order).
+        inc_otas: Vec<String>,
+        /// Working directory.
+        #[arg(short, long, default_value = ".")]
+        workdir: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -74,6 +99,13 @@ fn dispatch(cmd: Commands, verbose: bool) -> anyhow::Result<()> {
             imgpatchtools_rs::core::applypatch::imgdiff(&source, &target, &output, chunk_size)
         }
         Commands::Edify(args) => imgpatchtools_rs::core::edify::cli::run(&args, verbose),
+        Commands::Super(args) => imgpatchtools_rs::core::super_img::cli::run_super(&args),
+        Commands::Lpmake(args) => imgpatchtools_rs::core::super_img::cli::run_lpmake(&args),
+        Commands::Lpdump(args) => imgpatchtools_rs::core::super_img::cli::run_lpdump(&args),
+        Commands::Lpunpack(args) => imgpatchtools_rs::core::super_img::cli::run_lpunpack(&args),
+        Commands::Batch { .. } => {
+            anyhow::bail!("batch command is under construction!");
+        }
     }
 }
 
