@@ -11,6 +11,10 @@ use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 
+use super::lp_metadata::{
+    LpMetadata, LP_PARTITION_RESERVED_BYTES, LP_METADATA_GEOMETRY_SIZE,
+    LP_SECTOR_SIZE, LP_TARGET_TYPE_LINEAR,
+};
 use super::sparse;
 
 /// Copy buffer size — 4 MiB.
@@ -108,7 +112,8 @@ pub fn write_super_image(
         let pidx = metadata
             .partitions
             .iter()
-            .position(|p| p.name_str() == part_name);
+            .position(|p| p.name_str() == part_name.as_str());
+
         let pidx = match pidx {
             Some(i) => i,
             None => continue,
@@ -246,7 +251,8 @@ pub fn write_super_image_sparse(
         let pidx = match metadata
             .partitions
             .iter()
-            .position(|p| p.name_str() == part_name)
+            .position(|p| p.name_str() == part_name.as_str())
+
         {
             Some(i) => i,
             None => continue,

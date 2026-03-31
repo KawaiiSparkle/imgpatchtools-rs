@@ -1,220 +1,367 @@
-//! Metadata builder — constructs LP metadata from a config, allocates extents,
-//! computes all checksums. Version-aware (v1.0 / v1.1 / v1.2).
+//! LP metadata structures — low-level binary format definitions.
+//!
+//! These structures match the on-disk format defined in AOSP liblp.
 
-use anyhow::{ensure, Result};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 
-use super::lp_metadata::*;
-pub struct PartitionInfo {
-    pub name: String,
-    pub group_name: String,
-    pub attributes: u32,
-    pub size: u64,
+// ---------------------------------------------------------------------------
+// Constants (from AOSP liblp.h)
+// ---------------------------------------------------------------------------
+
+pub const LP_SECTOR_SIZE: u64 = 512;
+pub const LP_PARTITION_RESERVED_BYTES: u64 = 4096;
+pub const LP_METADATA_GEOMETRY_SIZE: u32 = 4096;
+
+// Alignment for partitions (1 MiB)
+pub const LP_DEFAULT_ALIGNMENT: u32 = 0x100000;  // 1 MiB
+
+// Partition attributes
+pub const LP_PARTITION_ATTR_NONE: u32 = 0x0;
+pub const LP_PARTITION_ATTR_READONLY: u32 = 0x1;
+
+// Magic values
+pub const LP_METADATA_GEOMETRY_MAGIC: u32 = 0x616C4467;
+pub const LP_METADATA_HEADER_MAGIC: u32 = 0x414C5030;  // "LP0\0"
+
+// Version constants
+pub const LP_METADATA_MAJOR_VERSION: u16 = 10;
+
+// Extent target types
+pub const LP_TARGET_TYPE_LINEAR: u32 = 0;
+pub const LP_TARGET_TYPE_ZERO: u32 = 1;
+
+// Header flags (v1.2+)
+pub const LP_HEADER_FLAG_VIRTUAL_AB_DEVICE: u32 = 0x1;
+
+// Partition name length
+pub const LP_PARTITION_NAME_LEN: usize = 36;
+
+// ---------------------------------------------------------------------------
+// Version enumeration
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LpVersion {
+    V1_0,  // Android 10
+    V1_1,  // Android 11 (adds ATTR_UPDATED)
+    V1_2,  // Android 12+ (adds header flags)
 }
 
-pub struct GroupInfo {
-    pub name: String,
-    pub max_size: u64,
+impl LpVersion {
+    pub fn from_android_version(ver: &str) -> Option<Self> {
+        match ver {
+            "10" => Some(Self::V1_0),
+            "11" => Some(Self::V1_1),
+            "12" | "13" | "14" | "15" => Some(Self::V1_2),
+            _ => None,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::V1_0 => "v10.0",
+            Self::V1_1 => "v10.1",
+            Self::V1_2 => "v10.2",
+        }
+    }
+
+    pub fn minor(&self) -> u16 {
+        match self {
+            Self::V1_0 => 0,
+            Self::V1_1 => 1,
+            Self::V1_2 => 2,
+        }
+    }
+
+    pub fn header_size(&self) -> u32 {
+        match self {
+            Self::V1_0 | Self::V1_1 => 128,
+            Self::V1_2 => 132,
+        }
+    }
 }
 
-pub struct SuperConfig {
-    pub device_size: u64,
+// ---------------------------------------------------------------------------
+// Table descriptor
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy)]
+pub struct LpMetadataTableDescriptor {
+    pub offset: u32,
+    pub num_entries: u32,
+    pub entry_size: u32,
+}
+
+impl LpMetadataTableDescriptor {
+    pub const SIZE: usize = 12;
+    
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut buf = [0u8; Self::SIZE];
+        buf[0..4].copy_from_slice(&self.offset.to_le_bytes());
+        buf[4..8].copy_from_slice(&self.num_entries.to_le_bytes());
+        buf[8..12].copy_from_slice(&self.entry_size.to_le_bytes());
+        buf
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Geometry block
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct LpMetadataGeometry {
+    pub magic: u32,
+    pub struct_size: u32,
+    pub checksum: [u8; 32],
     pub metadata_max_size: u32,
-    pub metadata_slots: u32,
-    pub block_device_name: String,
+    pub metadata_slot_count: u32,
+    pub logical_block_size: u32,
+}
+
+impl LpMetadataGeometry {
+    pub const STRUCT_SIZE: u32 = 4096;
+    
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = vec![0u8; Self::STRUCT_SIZE as usize];
+        buf[0..4].copy_from_slice(&self.magic.to_le_bytes());
+        buf[4..8].copy_from_slice(&self.struct_size.to_le_bytes());
+        buf[8..40].copy_from_slice(&self.checksum);
+        buf[40..44].copy_from_slice(&self.metadata_max_size.to_le_bytes());
+        buf[44..48].copy_from_slice(&self.metadata_slot_count.to_le_bytes());
+        buf[48..52].copy_from_slice(&self.logical_block_size.to_le_bytes());
+        buf
+    }
+    
+    pub fn to_block(&self) -> Vec<u8> {
+        let mut buf = self.to_bytes();
+        let hash: [u8; 32] = Sha256::digest(&buf[..self.struct_size as usize]).into();
+        buf[8..40].copy_from_slice(&hash);
+        buf
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Header
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct LpMetadataHeader {
+    pub magic: u32,
+    pub major_version: u16,
+    pub minor_version: u16,
+    pub header_size: u32,
+    pub header_checksum: [u8; 32],
+    pub tables_size: u32,
+    pub tables_checksum: [u8; 32],
+    pub partitions: LpMetadataTableDescriptor,
+    pub extents: LpMetadataTableDescriptor,
+    pub groups: LpMetadataTableDescriptor,
+    pub block_devices: LpMetadataTableDescriptor,
+    pub flags: u32,
+}
+
+impl LpMetadataHeader {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = vec![0u8; self.header_size as usize];
+        buf[0..4].copy_from_slice(&self.magic.to_le_bytes());
+        buf[4..6].copy_from_slice(&self.major_version.to_le_bytes());
+        buf[6..8].copy_from_slice(&self.minor_version.to_le_bytes());
+        buf[8..12].copy_from_slice(&self.header_size.to_le_bytes());
+        buf[12..44].copy_from_slice(&self.header_checksum);
+        buf[44..48].copy_from_slice(&self.tables_size.to_le_bytes());
+        buf[48..80].copy_from_slice(&self.tables_checksum);
+        buf[80..92].copy_from_slice(&self.partitions.to_bytes());
+        buf[92..104].copy_from_slice(&self.extents.to_bytes());
+        buf[104..116].copy_from_slice(&self.groups.to_bytes());
+        buf[116..128].copy_from_slice(&self.block_devices.to_bytes());
+        
+        if self.header_size >= 132 {
+            buf[128..132].copy_from_slice(&self.flags.to_le_bytes());
+        }
+        
+        buf
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Partition
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct LpMetadataPartition {
+    pub name: [u8; LP_PARTITION_NAME_LEN],
+    pub attributes: u32,
+    pub first_extent_index: u32,
+    pub num_extents: u32,
+    pub group_index: u32,
+}
+
+impl LpMetadataPartition {
+    pub const SIZE: usize = 52;
+    
+    pub fn new(name: &str, attributes: u32, group_index: u32) -> Self {
+        let mut name_bytes = [0u8; LP_PARTITION_NAME_LEN];
+        let bytes = name.as_bytes();
+        name_bytes[..bytes.len().min(LP_PARTITION_NAME_LEN)].copy_from_slice(
+            &bytes[..bytes.len().min(LP_PARTITION_NAME_LEN)]
+        );
+        
+        Self {
+            name: name_bytes,
+            attributes,
+            first_extent_index: 0,
+            num_extents: 0,
+            group_index,
+        }
+    }
+    
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut buf = [0u8; Self::SIZE];
+        buf[..LP_PARTITION_NAME_LEN].copy_from_slice(&self.name);
+        buf[36..40].copy_from_slice(&self.attributes.to_le_bytes());
+        buf[40..44].copy_from_slice(&self.first_extent_index.to_le_bytes());
+        buf[44..48].copy_from_slice(&self.num_extents.to_le_bytes());
+        buf[48..52].copy_from_slice(&self.group_index.to_le_bytes());
+        buf
+    }
+    
+    pub fn name_str(&self) -> String {
+        let null_pos = self.name.iter().position(|&b| b == 0).unwrap_or(LP_PARTITION_NAME_LEN);
+        String::from_utf8_lossy(&self.name[..null_pos]).to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Extent
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct LpMetadataExtent {
+    pub num_sectors: u64,
+    pub target_type: u32,
+    pub target_data: u64,
+    pub target_source: u32,
+}
+
+impl LpMetadataExtent {
+    pub const SIZE: usize = 24;
+    
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut buf = [0u8; Self::SIZE];
+        buf[0..8].copy_from_slice(&self.num_sectors.to_le_bytes());
+        buf[8..12].copy_from_slice(&self.target_type.to_le_bytes());
+        buf[12..20].copy_from_slice(&self.target_data.to_le_bytes());
+        buf[20..24].copy_from_slice(&self.target_source.to_le_bytes());
+        buf
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Partition Group
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct LpMetadataPartitionGroup {
+    pub name: [u8; LP_PARTITION_NAME_LEN],
+    pub flags: u32,
+    pub maximum_size: u64,
+}
+
+impl LpMetadataPartitionGroup {
+    pub const SIZE: usize = 48;
+    
+    pub fn new(name: &str, maximum_size: u64) -> Self {
+        let mut name_bytes = [0u8; LP_PARTITION_NAME_LEN];
+        let bytes = name.as_bytes();
+        name_bytes[..bytes.len().min(LP_PARTITION_NAME_LEN)].copy_from_slice(
+            &bytes[..bytes.len().min(LP_PARTITION_NAME_LEN)]
+        );
+        
+        Self {
+            name: name_bytes,
+            flags: 0,
+            maximum_size,
+        }
+    }
+    
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut buf = [0u8; Self::SIZE];
+        buf[..LP_PARTITION_NAME_LEN].copy_from_slice(&self.name);
+        buf[36..40].copy_from_slice(&self.flags.to_le_bytes());
+        buf[40..48].copy_from_slice(&self.maximum_size.to_le_bytes());
+        buf
+    }
+    
+    pub fn name_str(&self) -> String {
+        let null_pos = self.name.iter().position(|&b| b == 0).unwrap_or(LP_PARTITION_NAME_LEN);
+        String::from_utf8_lossy(&self.name[..null_pos]).to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Block Device
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct LpMetadataBlockDevice {
+    pub first_logical_sector: u64,
     pub alignment: u32,
     pub alignment_offset: u32,
-    pub logical_block_size: u32,
-    pub groups: Vec<GroupInfo>,
-    pub partitions: Vec<PartitionInfo>,
-    pub version: LpVersion,
-    pub header_flags: u32,
+    pub size: u64,
+    pub partition_name: [u8; LP_PARTITION_NAME_LEN],
+    pub flags: u32,
 }
 
-impl Default for SuperConfig {
-    fn default() -> Self {
-        Self {
-            device_size: 0,
-            metadata_max_size: 65536,
-            metadata_slots: 2,
-            block_device_name: "super".into(),
-            alignment: LP_DEFAULT_ALIGNMENT,
-            alignment_offset: 0,
-            logical_block_size: 4096,
-            groups: Vec::new(),
-            partitions: Vec::new(),
-            version: LpVersion::V1_0,
-            header_flags: 0,
-        }
+impl LpMetadataBlockDevice {
+    pub const SIZE: usize = 64;
+    
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut buf = [0u8; Self::SIZE];
+        buf[0..8].copy_from_slice(&self.first_logical_sector.to_le_bytes());
+        buf[8..12].copy_from_slice(&self.alignment.to_le_bytes());
+        buf[12..16].copy_from_slice(&self.alignment_offset.to_le_bytes());
+        buf[16..24].copy_from_slice(&self.size.to_le_bytes());
+        buf[24..60].copy_from_slice(&self.partition_name);
+        buf[60..64].copy_from_slice(&self.flags.to_le_bytes());
+        buf
     }
 }
 
-pub fn build_metadata(config: &SuperConfig) -> Result<LpMetadata> {
-    ensure!(config.device_size > 0, "device_size must be > 0");
-    ensure!(config.device_size % LP_SECTOR_SIZE == 0, "device_size must be multiple of 512");
-    ensure!(config.metadata_max_size >= 512, "metadata_max_size >= 512");
-    ensure!(config.metadata_slots >= 1, "metadata_slots >= 1");
-    ensure!(config.alignment > 0 && config.alignment % LP_SECTOR_SIZE as u32 == 0,
-        "alignment must be positive multiple of 512");
+// ---------------------------------------------------------------------------
+// Combined Metadata
+// ---------------------------------------------------------------------------
 
-    // first_logical_sector
-    let metadata_region = LP_PARTITION_RESERVED_BYTES
-        + (LP_METADATA_GEOMETRY_SIZE as u64) * 2
-        + (config.metadata_max_size as u64) * (config.metadata_slots as u64) * 2;
-
-    let first_logical_sector = align_up(metadata_region, config.alignment as u64) / LP_SECTOR_SIZE;
-
-    ensure!(first_logical_sector * LP_SECTOR_SIZE < config.device_size,
-        "metadata region exceeds device_size");
-
-    // Groups: index 0 = "default"
-    let mut groups = Vec::new();
-    groups.push(LpMetadataPartitionGroup::new("default", 0));
-    let mut gmap: HashMap<String, u32> = HashMap::new();
-    gmap.insert("default".into(), 0);
-
-    for g in &config.groups {
-        let idx = groups.len() as u32;
-        groups.push(LpMetadataPartitionGroup::new(&g.name, g.max_size));
-        gmap.insert(g.name.clone(), idx);
-    }
-
-    // Partitions + extents
-    let mut partitions = Vec::new();
-    let mut extents = Vec::new();
-    let mut cur_sector = first_logical_sector;
-
-    for p in &config.partitions {
-        let gidx = gmap.get(&p.group_name).copied().ok_or_else(|| {
-            anyhow::anyhow!("partition '{}': unknown group '{}'", p.name, p.group_name)
-        })?;
-
-        let mut part = LpMetadataPartition::new(&p.name, p.attributes, gidx);
-
-        if p.size > 0 {
-            cur_sector = align_up(cur_sector * LP_SECTOR_SIZE, config.alignment as u64) / LP_SECTOR_SIZE;
-            let num_sectors = align_up(p.size, LP_SECTOR_SIZE) / LP_SECTOR_SIZE;
-            let end_byte = (cur_sector + num_sectors) * LP_SECTOR_SIZE;
-            ensure!(end_byte <= config.device_size,
-                "partition '{}' (size={}) exceeds device_size {}", p.name, p.size, config.device_size);
-
-            part.first_extent_index = extents.len() as u32;
-            part.num_extents = 1;
-            extents.push(LpMetadataExtent {
-                num_sectors,
-                target_type: LP_TARGET_TYPE_LINEAR,
-                target_data: cur_sector,
-                target_source: 0,
-            });
-            cur_sector += num_sectors;
-        }
-        partitions.push(part);
-    }
-
-    // Block device
-    let mut bd_name = [0u8; LP_PARTITION_NAME_LEN];
-    let nb = config.block_device_name.as_bytes();
-    bd_name[..nb.len().min(35)].copy_from_slice(&nb[..nb.len().min(35)]);
-
-    let block_devices = vec![LpMetadataBlockDevice {
-        first_logical_sector,
-        alignment: config.alignment,
-        alignment_offset: config.alignment_offset,
-        size: config.device_size,
-        partition_name: bd_name,
-        flags: 0,
-    }];
-
-    // Serialize tables
-    let mut tables: Vec<u8> = Vec::new();
-    let p_off = 0u32;
-    for p in &partitions { tables.extend_from_slice(&p.to_bytes()); }
-    let e_off = tables.len() as u32;
-    for e in &extents { tables.extend_from_slice(&e.to_bytes()); }
-    let g_off = tables.len() as u32;
-    for g in &groups { tables.extend_from_slice(&g.to_bytes()); }
-    let bd_off = tables.len() as u32;
-    for bd in &block_devices { tables.extend_from_slice(&bd.to_bytes()); }
-    let tables_size = tables.len() as u32;
-
-    let tables_checksum: [u8; 32] = Sha256::digest(&tables).into();
-
-    let header_size = config.version.header_size();
-    let minor_version = config.version.minor();
-
-    let mut header = LpMetadataHeader {
-        magic: LP_METADATA_HEADER_MAGIC,
-        major_version: LP_METADATA_MAJOR_VERSION,
-        minor_version,
-        header_size,
-        header_checksum: [0u8; 32],
-        tables_size,
-        tables_checksum,
-        partitions: LpMetadataTableDescriptor {
-            offset: p_off, num_entries: partitions.len() as u32,
-            entry_size: LpMetadataPartition::SIZE as u32,
-        },
-        extents: LpMetadataTableDescriptor {
-            offset: e_off, num_entries: extents.len() as u32,
-            entry_size: LpMetadataExtent::SIZE as u32,
-        },
-        groups: LpMetadataTableDescriptor {
-            offset: g_off, num_entries: groups.len() as u32,
-            entry_size: LpMetadataPartitionGroup::SIZE as u32,
-        },
-        block_devices: LpMetadataTableDescriptor {
-            offset: bd_off, num_entries: block_devices.len() as u32,
-            entry_size: LpMetadataBlockDevice::SIZE as u32,
-        },
-        flags: config.header_flags,
-    };
-
-    // Header checksum: hash header_size bytes with checksum zeroed
-    let mut hdr_bytes = header.to_bytes();
-    hdr_bytes[12..44].fill(0); // zero checksum field
-    let hdr_hash: [u8; 32] = Sha256::digest(&hdr_bytes[..header_size as usize]).into();
-    header.header_checksum = hdr_hash;
-
-    // Geometry
-    let mut geometry = LpMetadataGeometry {
-        magic: LP_METADATA_GEOMETRY_MAGIC,
-        struct_size: LpMetadataGeometry::STRUCT_SIZE,
-        checksum: [0u8; 32],
-        metadata_max_size: config.metadata_max_size,
-        metadata_slot_count: config.metadata_slots,
-        logical_block_size: config.logical_block_size,
-    };
-
-    // FIX: Explictly calculate and populate the geometry checksum so that it is globally consistent
-    // (This fixes the 7-Zip parsing error / "Corrupt metadata" issue)
-    let geo_bytes_temp = geometry.to_bytes();
-    geometry.checksum.copy_from_slice(&geo_bytes_temp[8..40]);
-
-    let total = header_size as usize + tables.len();
-    ensure!(total <= config.metadata_max_size as usize,
-        "metadata blob ({} bytes) exceeds metadata_max_size ({})", total, config.metadata_max_size);
-
-    Ok(LpMetadata { geometry, header, partitions, extents, groups, block_devices })
+#[derive(Debug, Clone)]
+pub struct LpMetadata {
+    pub geometry: LpMetadataGeometry,
+    pub header: LpMetadataHeader,
+    pub partitions: Vec<LpMetadataPartition>,
+    pub extents: Vec<LpMetadataExtent>,
+    pub groups: Vec<LpMetadataPartitionGroup>,
+    pub block_devices: Vec<LpMetadataBlockDevice>,
 }
 
-/// Calculate minimum device_size for a given config.
-pub fn auto_device_size(config: &SuperConfig) -> u64 {
-    let metadata_region = LP_PARTITION_RESERVED_BYTES
-        + (LP_METADATA_GEOMETRY_SIZE as u64) * 2
-        + (config.metadata_max_size as u64) * (config.metadata_slots as u64) * 2;
+// ---------------------------------------------------------------------------
+// Helper functions
+// ---------------------------------------------------------------------------
 
-    let al = config.alignment as u64;
-    let mut data: u64 = 0;
-    for p in &config.partitions {
-        data = align_up(data, al);
-        data += align_up(p.size, LP_SECTOR_SIZE);
-    }
-    align_up(align_up(metadata_region, al) + data, al)
+pub fn read_name(bytes: &[u8; LP_PARTITION_NAME_LEN]) -> String {
+    let null_pos = bytes.iter().position(|&b| b == 0).unwrap_or(LP_PARTITION_NAME_LEN);
+    String::from_utf8_lossy(&bytes[..null_pos]).to_string()
 }
 
-fn align_up(v: u64, a: u64) -> u64 {
-    if a == 0 { return v; }
-    let r = v % a;
-    if r == 0 { v } else { v + (a - r) }
+// Helper functions for reading binary data
+pub fn r16(buf: &[u8], off: usize) -> u16 {
+    u16::from_le_bytes([buf[off], buf[off + 1]])
+}
+
+pub fn r32(buf: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
+}
+
+pub fn r64(buf: &[u8], off: usize) -> u64 {
+    u64::from_le_bytes([
+        buf[off], buf[off + 1], buf[off + 2], buf[off + 3],
+        buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7],
+    ])
 }

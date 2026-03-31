@@ -99,7 +99,7 @@ fn dispatch(cmd: Commands, verbose: bool) -> anyhow::Result<()> {
             imgpatchtools_rs::core::applypatch::imgdiff(&source, &target, &output, chunk_size)
         }
         Commands::Edify(args) => imgpatchtools_rs::core::edify::cli::run(&args, verbose),
-        Commands::Super(args) => imgpatchtools_rs::core::super_img::cli::run_super(&args),
+        Commands::Super(args) => imgpatchtools_rs::core::super_img::cli::run(&args),
         Commands::Lpmake(args) => imgpatchtools_rs::core::super_img::cli::run_lpmake(&args),
         Commands::Lpdump(args) => imgpatchtools_rs::core::super_img::cli::run_lpdump(&args),
         Commands::Lpunpack(args) => imgpatchtools_rs::core::super_img::cli::run_lpunpack(&args),

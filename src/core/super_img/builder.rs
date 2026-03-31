@@ -7,6 +7,10 @@ use std::collections::HashMap;
 
 use super::lp_metadata::*;
 
+// ---------------------------------------------------------------------------
+// Builder-specific configuration structures
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone)]
 pub struct PartitionInfo {
     pub name: String,
@@ -53,6 +57,10 @@ impl Default for SuperConfig {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Main builder functions
+// ---------------------------------------------------------------------------
 
 pub fn build_metadata(config: &SuperConfig) -> Result<LpMetadata> {
     ensure!(config.device_size > 0, "device_size must be > 0");
@@ -190,8 +198,7 @@ pub fn build_metadata(config: &SuperConfig) -> Result<LpMetadata> {
         logical_block_size: config.logical_block_size,
     };
 
-    // FIX: Explictly calculate and populate the geometry checksum so that it is globally consistent
-    // (This fixes the 7-Zip parsing error / "Corrupt metadata" issue)
+    // FIX: Explicitly calculate and populate the geometry checksum
     let geo_bytes_temp = geometry.to_bytes();
     geometry.checksum.copy_from_slice(&geo_bytes_temp[8..40]);
 
