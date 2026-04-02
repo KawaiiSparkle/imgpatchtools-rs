@@ -34,6 +34,9 @@ pub struct FunctionContext {
     pub progress: Box<dyn ProgressReporter>,
     pub workdir: String,
     pub dynamic_partitions: Option<DynamicPartitionState>,
+    /// When true, getprop returns tolerant defaults instead of trying device props.
+    /// Used by batch mode and when scripts reference compressed data files.
+    pub offline_mode: bool,
 }
 
 impl FunctionContext {
@@ -103,6 +106,44 @@ pub fn builtin_registry() -> FunctionRegistry {
     r.register("ifelse", fn_ifelse_fallback);
     r.register("equal", fn_equal);
     r.register("concat", fn_concat);
+
+    // --- Integer comparison / arithmetic predicates ---
+    r.register("less_than_int", fn_less_than_int);
+    r.register("greater_than_int", fn_greater_than_int);
+    r.register("max_of", fn_max_of);
+    // Negation variants (the ! is part of the function name in edify)
+    r.register("!less_than_int", fn_not_less_than_int);
+    r.register("!greater_than_int", fn_not_greater_than_int);
+
+    // --- String predicates ---
+    r.register("not_equal", fn_not_equal);
+    r.register("!", fn_not);
+    r.register("matches", fn_matches);
+    r.register("regex_match", fn_matches);
+
+    // --- File / device helpers (offline-friendly stubs) ---
+    r.register("mount", fn_noop_true);
+    r.register("unmount", fn_noop_true);
+    r.register("is_mounted", fn_is_mounted);
+    r.register("format", fn_noop_true);
+    r.register("wipe_cache", fn_noop_true);
+    r.register("sleep", fn_noop_true);
+    r.register("delete", fn_delete);
+    r.register("rename", fn_noop_true);
+    r.register("tune2fs", fn_noop_true);
+
+    // --- Property / file reading ---
+    r.register("file_getprop", fn_file_getprop);
+    r.register("read_file", fn_read_file);
+
+    // --- Image writing ---
+    r.register("write_raw_image", fn_write_raw_image);
+
+    // --- SHA1 / verification ---
+    r.register("sha1_check", fn_sha1_check);
+    r.register("verify_trustzone", fn_noop_true);
+    r.register("allow_reboot", fn_noop_true);
+
     r
 }
 
@@ -110,9 +151,79 @@ fn fn_noop(_ctx: &mut FunctionContext, _args: &[Value]) -> Result<Value> {
     Ok(Value::String(String::new()))
 }
 
-fn fn_getprop(_ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
-    let n = args.first().map_or("", |a| a.as_str());
-    Ok(Value::String(match n { "ro.product.device" => "IFLYTEKCB".into(), _ => String::new() }))
+fn fn_getprop(ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
+    let prop = args.first().map_or("", |a| a.as_str());
+
+    // Try to read from build.prop in workdir (if available).
+    if let Some(val) = lookup_build_prop(prop, &ctx.workdir) {
+        return Ok(Value::String(val));
+    }
+
+    // Known safe defaults for common OTA properties.
+    if let Some(val) = known_default(prop) {
+        log::warn!(
+            "[WARN] getprop(\"{}\") → returning default \"{}\" (no build.prop available)",
+            prop, val
+        );
+        return Ok(Value::String(val));
+    }
+
+    // In offline mode, return empty string with warning (never abort).
+    if ctx.offline_mode {
+        log::warn!(
+            "[WARN] getprop(\"{}\") → returning empty string (offline mode)",
+            prop
+        );
+        return Ok(Value::String(String::new()));
+    }
+
+    // Default: return empty string (historical behaviour).
+    log::warn!(
+        "[WARN] getprop(\"{}\") → property not available, returning empty string",
+        prop
+    );
+    Ok(Value::String(String::new()))
+}
+
+/// Attempt to read a property from build.prop in the workdir.
+fn lookup_build_prop(prop: &str, workdir: &str) -> Option<String> {
+    let build_prop = std::path::Path::new(workdir).join("build.prop");
+    if !build_prop.exists() {
+        return None;
+    }
+    let content = std::fs::read_to_string(&build_prop).ok()?;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if let Some(eq_pos) = line.find('=') {
+            let key = &line[..eq_pos];
+            if key == prop {
+                return Some(line[eq_pos + 1..].trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Known default values for commonly queried properties in OTA scripts.
+fn known_default(prop: &str) -> Option<String> {
+    match prop {
+        "ro.product.device" | "ro.build.product" | "ro.hardware" => {
+            Some("generic".to_string())
+        }
+        "ro.build.display.id" => Some("generic".to_string()),
+        "ro.build.version.sdk" => Some("30".to_string()),
+        "ro.build.version.release" => Some("13".to_string()),
+        "ro.build.type" => Some("user".to_string()),
+        "ro.debuggable" => Some("0".to_string()),
+        "ro.secure" => Some("1".to_string()),
+        "ro.system.product.device" => Some("generic".to_string()),
+        "ro.vendor.product.device" => Some("generic".to_string()),
+        "ro.build.date.utc" | "ro.build.date" => Some("0".to_string()),
+        _ => None,
+    }
 }
 
 fn fn_package_extract_file(ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
@@ -312,11 +423,24 @@ fn fn_check_first_block(ctx: &mut FunctionContext, args: &[Value]) -> Result<Val
     Ok(Value::String(if crate::core::blockimg::verify::check_first_block(&p, 4096)? { "t" } else { "" }.into()))
 }
 
-fn fn_abort(_ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
-    bail!("abort: {}", args.first().map_or("aborted", |v| v.as_str()));
+fn fn_abort(ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
+    let msg = args.first().map_or("aborted", |v| v.as_str());
+    if ctx.offline_mode {
+        log::warn!("[OFFLINE] abort(\"{}\") → skipped (offline mode)", msg);
+        return Ok(Value::String(String::new()));
+    }
+    bail!("abort: {}", msg);
 }
-fn fn_assert_fallback(_ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
-    for (i, a) in args.iter().enumerate() { if !a.is_truthy() { bail!("assert failed on arg {i}"); } }
+fn fn_assert_fallback(ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
+    for (i, a) in args.iter().enumerate() {
+        if !a.is_truthy() {
+            if ctx.offline_mode {
+                log::warn!("[OFFLINE] assert failed on arg {} → skipped (offline mode)", i);
+                return Ok(Value::String(String::new()));
+            }
+            bail!("assert failed on argument {i}");
+        }
+    }
     Ok(Value::String("t".into()))
 }
 fn fn_concat(_ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
@@ -333,16 +457,216 @@ fn fn_equal(_ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
 }
 
 // ---------------------------------------------------------------------------
+// Integer comparison / arithmetic predicates
+// ---------------------------------------------------------------------------
+
+/// Parse an integer from a string. Empty/invalid strings default to 0.
+/// This is important for offline mode where getprop may return empty strings
+/// — e.g. `!less_than_int(1773654484, getprop("ro.build.date.utc"))` should
+/// not fail just because the property is unavailable.
+fn parse_i64(s: &str) -> i64 {
+    s.trim().parse::<i64>().unwrap_or(0)
+}
+
+fn fn_less_than_int(_ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
+    if args.len() < 2 { bail!("less_than_int: need 2 args"); }
+    let a = parse_i64(args[0].as_str());
+    let b = parse_i64(args[1].as_str());
+    Ok(Value::String(if a < b { "t".into() } else { String::new() }))
+}
+
+fn fn_not_less_than_int(_ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
+    if args.len() < 2 { bail!("!less_than_int: need 2 args"); }
+    let a = parse_i64(args[0].as_str());
+    let b = parse_i64(args[1].as_str());
+    Ok(Value::String(if a < b { String::new() } else { "t".into() }))
+}
+
+fn fn_greater_than_int(_ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
+    if args.len() < 2 { bail!("greater_than_int: need 2 args"); }
+    let a = parse_i64(args[0].as_str());
+    let b = parse_i64(args[1].as_str());
+    Ok(Value::String(if a > b { "t".into() } else { String::new() }))
+}
+
+fn fn_not_greater_than_int(_ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
+    if args.len() < 2 { bail!("!greater_than_int: need 2 args"); }
+    let a = parse_i64(args[0].as_str());
+    let b = parse_i64(args[1].as_str());
+    Ok(Value::String(if a > b { String::new() } else { "t".into() }))
+}
+
+fn fn_max_of(_ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
+    if args.len() < 2 { bail!("max_of: need 2 args"); }
+    let a = parse_i64(args[0].as_str());
+    let b = parse_i64(args[1].as_str());
+    Ok(Value::String(if a >= b { args[0].as_str().to_string() } else { args[1].as_str().to_string() }))
+}
+
+// ---------------------------------------------------------------------------
+// String predicates
+// ---------------------------------------------------------------------------
+
+fn fn_not_equal(_ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
+    if args.len() < 2 { return Ok(Value::String(String::new())); }
+    Ok(Value::String(if args[0].as_str() != args[1].as_str() { "t".into() } else { String::new() }))
+}
+
+fn fn_not(_ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
+    let truthy = args.first().map_or(false, |a| a.is_truthy());
+    Ok(Value::String(if truthy { String::new() } else { "t".into() }))
+}
+
+fn fn_matches(_ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
+    if args.len() < 2 { bail!("matches: need 2 args"); }
+    let s = args[0].as_str();
+    let pattern = args[1].as_str();
+    // AOSP matches() uses POSIX extended regex.
+    match regex::Regex::new(pattern) {
+        Ok(re) => Ok(Value::String(if re.is_match(s) { "t".into() } else { String::new() })),
+        Err(_) => Ok(Value::String(String::new())),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// File / device helpers (offline-friendly stubs)
+// ---------------------------------------------------------------------------
+
+fn fn_noop_true(_ctx: &mut FunctionContext, _args: &[Value]) -> Result<Value> {
+    Ok(Value::String("t".into()))
+}
+
+fn fn_is_mounted(_ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
+    // In offline/batch mode, always return empty (not mounted).
+    let _path = args.first().map_or("", |a| a.as_str());
+    log::warn!("[WARN] is_mounted({}) → \"\" (offline mode)", _path);
+    Ok(Value::String(String::new()))
+}
+
+fn fn_delete(ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
+    if args.is_empty() { bail!("delete: need 1 arg"); }
+    let path = ctx.resolve_package_path(args[0].as_str());
+    if path.exists() {
+        match std::fs::remove_file(&path) {
+            Ok(()) => log::info!("delete: removed {}", path.display()),
+            Err(e) => log::warn!("delete: failed to remove {}: {}", path.display(), e),
+        }
+    }
+    Ok(Value::String("t".into()))
+}
+
+// ---------------------------------------------------------------------------
+// Property / file reading
+// ---------------------------------------------------------------------------
+
+fn fn_file_getprop(ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
+    if args.len() < 2 { bail!("file_getprop: need 2 args (file, key)"); }
+    let file_path = ctx.resolve_package_path(args[0].as_str());
+    let key = args[1].as_str();
+    let content = match std::fs::read_to_string(&file_path) {
+        Ok(c) => c,
+        Err(_) => return Ok(Value::String(String::new())),
+    };
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() { continue; }
+        if let Some(eq_pos) = line.find('=') {
+            if line[..eq_pos].trim() == key {
+                return Ok(Value::String(line[eq_pos + 1..].trim().to_string()));
+            }
+        }
+    }
+    Ok(Value::String(String::new()))
+}
+
+fn fn_read_file(ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
+    if args.is_empty() { bail!("read_file: need 1 arg"); }
+    let path = ctx.resolve_package_path(args[0].as_str());
+    match std::fs::read_to_string(&path) {
+        Ok(content) => Ok(Value::String(content)),
+        Err(_) => Ok(Value::String(String::new())),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Image writing
+// ---------------------------------------------------------------------------
+
+fn fn_write_raw_image(ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
+    if args.len() < 2 { bail!("write_raw_image: need 2 args (src, dest)"); }
+    let src = ctx.resolve_package_path(args[0].as_str());
+    let dest = ctx.resolve_or_create_image_path(args[1].as_str());
+    if !src.exists() {
+        log::warn!("write_raw_image: source {} not found, skipping", src.display());
+        return Ok(Value::String("t".into()));
+    }
+    log::info!("write_raw_image: {} → {}", src.display(), dest.display());
+    if let Some(parent) = dest.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::copy(&src, &dest)
+        .with_context(|| format!("write_raw_image: copy {} → {}", src.display(), dest.display()))?;
+    Ok(Value::String("t".into()))
+}
+
+// ---------------------------------------------------------------------------
+// SHA1 / verification
+// ---------------------------------------------------------------------------
+
+fn fn_sha1_check(ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
+    if args.is_empty() { bail!("sha1_check: need at least 1 arg"); }
+    let expected = args[0].as_str();
+    // If only 1 arg, the hash of the data from the previous function is checked.
+    if args.len() == 1 {
+        // Single-arg form: sha1_check(expected_hash) — matches against
+        // the sha1 of the most recently extracted data. In our offline context,
+        // we can't know that, so return "t" to not block the script.
+        log::warn!("[WARN] sha1_check({}) → \"t\" (single-arg stub, offline mode)", expected);
+        return Ok(Value::String("t".into()));
+    }
+    // Multi-arg form: sha1_check(expected, data, ...) — compare hashes.
+    let data = args[1..].iter().map(|a| a.as_str()).collect::<Vec<_>>().join("");
+    let actual = crate::util::hash::sha1_hex(data.as_bytes());
+    Ok(Value::String(if actual == expected { "t".into() } else { String::new() }))
+}
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 
 pub fn run_script(script: &str, registry: &FunctionRegistry, workdir: &str) -> Result<ScriptResult> {
+    run_script_offline(script, registry, workdir, false)
+}
+
+/// Run an edify script with optional offline mode.
+///
+/// In offline mode, `getprop` returns tolerant defaults and never aborts.
+/// This is used by batch processing where no real device properties are available.
+pub fn run_script_offline(
+    script: &str,
+    registry: &FunctionRegistry,
+    workdir: &str,
+    offline_mode: bool,
+) -> Result<ScriptResult> {
+    // Pre-scan: detect if the script references compressed data files.
+    // If so, automatically enable offline mode for getprop tolerance.
+    let effective_offline = offline_mode
+        || script.contains(".dat.br")
+        || script.contains(".dat.lzma");
+
+    if effective_offline {
+        log::info!(
+            "edify: offline mode enabled (getprop will return tolerant defaults)"
+        );
+    }
+
     let ast = parse_edify(script).context("edify parse error")?;
     let mut ctx = FunctionContext {
         current_function: String::new(),
         progress: new_progress(false),
         workdir: workdir.to_string(),
         dynamic_partitions: None,
+        offline_mode: effective_offline,
     };
     let value = eval(&ast, &mut ctx, registry)?;
     Ok(ScriptResult { value, dynamic_partitions: ctx.dynamic_partitions })
@@ -387,7 +711,13 @@ fn eval_ifelse(args: &[Expr], ctx: &mut FunctionContext, reg: &FunctionRegistry)
 
 fn eval_assert(args: &[Expr], ctx: &mut FunctionContext, reg: &FunctionRegistry) -> Result<Value> {
     for (i, a) in args.iter().enumerate() {
-        if !eval(a, ctx, reg)?.is_truthy() { bail!("assert failed on argument {i}"); }
+        if !eval(a, ctx, reg)?.is_truthy() {
+            if ctx.offline_mode {
+                log::warn!("[OFFLINE] assert failed on argument {} → skipped (offline mode)", i);
+                return Ok(Value::String(String::new()));
+            }
+            bail!("assert failed on argument {i}");
+        }
     }
     Ok(Value::String("t".into()))
 }

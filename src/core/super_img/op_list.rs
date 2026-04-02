@@ -90,8 +90,14 @@ pub fn parse_op_list(content: &str) -> Result<DynamicPartitionState> {
                 if s.find_partition(t[1]).is_some() {
                     bail!("add: '{}' exists ({})", t[1], ctx());
                 }
+                // AOSP: add <name> <group> [size] — size is optional
+                let sz: u64 = if t.len() >= 4 {
+                    t[3].parse().with_context(ctx)?
+                } else {
+                    0
+                };
                 s.partitions.push(PartitionState {
-                    name: t[1].into(), group_name: t[2].into(), size: 0,
+                    name: t[1].into(), group_name: t[2].into(), size: sz,
                 });
             }
             "remove" => {

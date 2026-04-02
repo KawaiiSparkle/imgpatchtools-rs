@@ -282,8 +282,7 @@ pub fn write_super_image_sparse(
 
             let start_block = (disk_off / SPARSE_BLOCK_SIZE as u64) as u32;
             // Round up to full blocks — pad with zeros if needed
-            let num_blocks =
-                ((wlen + SPARSE_BLOCK_SIZE as u64 - 1) / SPARSE_BLOCK_SIZE as u64) as u32;
+            let num_blocks = wlen.div_ceil(SPARSE_BLOCK_SIZE as u64) as u32;
 
             regions.push(SparseRegion {
                 start_block,

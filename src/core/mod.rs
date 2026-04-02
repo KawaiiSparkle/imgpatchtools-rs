@@ -7,6 +7,7 @@
 //! | [`edify`]      | Edify script engine    |
 
 pub mod applypatch;
+pub mod batch;
 pub mod blockimg;
 pub mod edify;
 pub mod super_img;

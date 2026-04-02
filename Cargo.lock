@@ -597,6 +597,7 @@ dependencies = [
  "predicates",
  "pretty_assertions",
  "rayon",
+ "regex",
  "sha1",
  "sha2",
  "tempfile",

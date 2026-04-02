@@ -21,7 +21,7 @@ pub const LP_PARTITION_ATTR_READONLY: u32 = 0x1;
 
 // Magic values
 pub const LP_METADATA_GEOMETRY_MAGIC: u32 = 0x616C4467;
-pub const LP_METADATA_HEADER_MAGIC: u32 = 0x414C5030;  // "LP0\0"
+pub const LP_METADATA_HEADER_MAGIC: u32 = 0x414C5030;  // on-disk LE bytes: "0PLA"
 
 // Version constants
 pub const LP_METADATA_MAJOR_VERSION: u16 = 10;
@@ -75,8 +75,10 @@ impl LpVersion {
 
     pub fn header_size(&self) -> u32 {
         match self {
+            // v1.0/v1.1: 4+2+2+4+32+4+32+12*4 = 128 bytes
             Self::V1_0 | Self::V1_1 => 128,
-            Self::V1_2 => 132,
+            // v1.2: 128 + 4(flags) + 124(reserved) = 256 bytes
+            Self::V1_2 => 256,
         }
     }
 }
@@ -119,10 +121,15 @@ pub struct LpMetadataGeometry {
 }
 
 impl LpMetadataGeometry {
-    pub const STRUCT_SIZE: u32 = 4096;
-    
+    /// On-disk block size (geometry is stored in a full 4096-byte block).
+    pub const BLOCK_SIZE: u32 = 4096;
+    /// sizeof(LpMetadataGeometry) with __attribute__((packed)).
+    /// 4+4+32+4+4+4 = 52. AOSP validates this field == 52.
+    pub const STRUCT_SIZE: u32 = 52;
+
+    /// Serialize into a full 4096-byte block (zero-padded).
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = vec![0u8; Self::STRUCT_SIZE as usize];
+        let mut buf = vec![0u8; Self::BLOCK_SIZE as usize];
         buf[0..4].copy_from_slice(&self.magic.to_le_bytes());
         buf[4..8].copy_from_slice(&self.struct_size.to_le_bytes());
         buf[8..40].copy_from_slice(&self.checksum);
@@ -132,9 +139,14 @@ impl LpMetadataGeometry {
         buf
     }
     
+    /// Serialize and compute SHA256 checksum.
+    /// AOSP: "SHA256 of this struct, with this field set to 0" — hashes only
+    /// the first struct_size (52) bytes, NOT the full 4096-byte block.
     pub fn to_block(&self) -> Vec<u8> {
         let mut buf = self.to_bytes();
-        let hash: [u8; 32] = Sha256::digest(&buf[..self.struct_size as usize]).into();
+        // Zero the checksum field, then hash only the packed struct portion.
+        buf[8..40].fill(0);
+        let hash: [u8; 32] = Sha256::digest(&buf[..Self::STRUCT_SIZE as usize]).into();
         buf[8..40].copy_from_slice(&hash);
         buf
     }
@@ -175,8 +187,10 @@ impl LpMetadataHeader {
         buf[104..116].copy_from_slice(&self.groups.to_bytes());
         buf[116..128].copy_from_slice(&self.block_devices.to_bytes());
         
-        if self.header_size >= 132 {
+        // flags at offset 128, only for v1.2+ (header_size > 128)
+        if self.header_size > 128 {
             buf[128..132].copy_from_slice(&self.flags.to_le_bytes());
+            // bytes 132..256 are reserved and left as zeros
         }
         
         buf

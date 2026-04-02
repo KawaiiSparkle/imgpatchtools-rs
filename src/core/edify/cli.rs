@@ -49,10 +49,7 @@ pub fn run(args: &EdifyArgs, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-/// Automatically extracts install-recovery.sh and recovery-from-boot.p from
-/// the patched system.img, parses the target SHA1 and size, and patches
-/// boot.img to generate recovery.img.
-fn auto_patch_recovery(workdir: &str) {
+pub(crate) fn auto_patch_recovery(workdir: &str) {
     let boot_path = Path::new(workdir).join("boot.img");
     let recovery_path = Path::new(workdir).join("recovery.img");
     let sys_img = Path::new(workdir).join("system.img");

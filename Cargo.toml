@@ -31,6 +31,7 @@ log         = "0.4"
 env_logger  = "0.11"
 tempfile    = "3"
 rayon       = "1"
+regex       = "1"
 libz-sys    = { version = "1", features = ["static"] }
 
 [dev-dependencies]

@@ -64,10 +64,11 @@ impl Default for SuperConfig {
 
 pub fn build_metadata(config: &SuperConfig) -> Result<LpMetadata> {
     ensure!(config.device_size > 0, "device_size must be > 0");
-    ensure!(config.device_size % LP_SECTOR_SIZE == 0, "device_size must be multiple of 512");
+    ensure!(config.device_size.is_multiple_of(LP_SECTOR_SIZE),
+        "device_size must be multiple of 512");
     ensure!(config.metadata_max_size >= 512, "metadata_max_size >= 512");
     ensure!(config.metadata_slots >= 1, "metadata_slots >= 1");
-    ensure!(config.alignment > 0 && config.alignment % LP_SECTOR_SIZE as u32 == 0,
+    ensure!(config.alignment > 0 && (config.alignment as u64).is_multiple_of(LP_SECTOR_SIZE),
         "alignment must be positive multiple of 512");
 
     // first_logical_sector
@@ -92,12 +93,15 @@ pub fn build_metadata(config: &SuperConfig) -> Result<LpMetadata> {
         gmap.insert(g.name.clone(), idx);
     }
 
-    // Partitions + extents
+    // Partitions + extents — AOSP requires partitions sorted by name.
+    let mut sorted_partitions: Vec<&PartitionInfo> = config.partitions.iter().collect();
+    sorted_partitions.sort_by(|a, b| a.name.cmp(&b.name));
+
     let mut partitions = Vec::new();
     let mut extents = Vec::new();
     let mut cur_sector = first_logical_sector;
 
-    for p in &config.partitions {
+    for p in &sorted_partitions {
         let gidx = gmap.get(&p.group_name).copied().ok_or_else(|| {
             anyhow::anyhow!("partition '{}': unknown group '{}'", p.name, p.group_name)
         })?;
@@ -189,18 +193,16 @@ pub fn build_metadata(config: &SuperConfig) -> Result<LpMetadata> {
     header.header_checksum = hdr_hash;
 
     // Geometry
-    let mut geometry = LpMetadataGeometry {
+    // Note: checksum is left as [0;32] here; writer calls to_block() which
+    // properly zeros the checksum field and computes SHA256 over 52 bytes.
+    let geometry = LpMetadataGeometry {
         magic: LP_METADATA_GEOMETRY_MAGIC,
-        struct_size: LpMetadataGeometry::STRUCT_SIZE,
+        struct_size: LpMetadataGeometry::STRUCT_SIZE, // 52
         checksum: [0u8; 32],
         metadata_max_size: config.metadata_max_size,
         metadata_slot_count: config.metadata_slots,
         logical_block_size: config.logical_block_size,
     };
-
-    // FIX: Explicitly calculate and populate the geometry checksum
-    let geo_bytes_temp = geometry.to_bytes();
-    geometry.checksum.copy_from_slice(&geo_bytes_temp[8..40]);
 
     let total = header_size as usize + tables.len();
     ensure!(total <= config.metadata_max_size as usize,
@@ -210,18 +212,41 @@ pub fn build_metadata(config: &SuperConfig) -> Result<LpMetadata> {
 }
 
 /// Calculate minimum device_size for a given config.
+///
+/// The result accounts for:
+/// 1. Actual partition data sizes (aligned to `alignment`).
+/// 2. Group maximum sizes — if a group declares `maximum_size`, the device
+///    must be at least `metadata_end + maximum_size` so that tools like 7-Zip
+///    don't report "Unexpected end of archive".
 pub fn auto_device_size(config: &SuperConfig) -> u64 {
     let metadata_region = LP_PARTITION_RESERVED_BYTES
         + (LP_METADATA_GEOMETRY_SIZE as u64) * 2
         + (config.metadata_max_size as u64) * (config.metadata_slots as u64) * 2;
 
     let al = config.alignment as u64;
+
+    // Size needed for actual partition data.
     let mut data: u64 = 0;
     for p in &config.partitions {
         data = align_up(data, al);
         data += align_up(p.size, LP_SECTOR_SIZE);
     }
-    align_up(align_up(metadata_region, al) + data, al)
+    let mut sz = align_up(align_up(metadata_region, al) + data, al);
+
+    // Ensure the device is large enough for every group's maximum_size.
+    // AOSP stores group.maximum_size as the max total bytes available for
+    // partitions in that group.  7-Zip uses this value to determine the
+    // expected physical size; if device_size < group.max_size, it reports
+    // "Unexpected end of archive".
+    let metadata_end = align_up(metadata_region, al);
+    for g in &config.groups {
+        if g.max_size > 0 {
+            let needed = align_up(metadata_end + g.max_size, al);
+            sz = sz.max(needed);
+        }
+    }
+
+    sz
 }
 
 fn align_up(v: u64, a: u64) -> u64 {

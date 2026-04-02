@@ -59,7 +59,8 @@ fn parse_metadata_blob(blob: &[u8], geometry: LpMetadataGeometry) -> Result<LpMe
     let g_desc = parse_td(blob, 104);
     let bd_desc = parse_td(blob, 116);
 
-    let flags = if header_size >= 132 { r32(blob, 128) } else { 0 };
+    // v1.0/v1.1 have header_size=128, no flags. v1.2 has header_size=256, flags at offset 128.
+    let flags = if header_size > 128 { r32(blob, 128) } else { 0 };
 
     let t = &blob[header_size..header_size + tables_size];
 

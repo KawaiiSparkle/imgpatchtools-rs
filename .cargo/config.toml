@@ -1,0 +1,13 @@
+# Build configuration for imgpatchtools-rs.
+#
+# Release builds produce a fully static ELF binary (static-pie)
+# with zero external shared-library dependencies.
+#
+# Usage:
+#   cargo build --release          → normal release (dynamic)
+#   cargo build-release-static     → fully static release binary
+#   cargo b-release-static         → same, shorter alias
+
+[alias]
+build-release-static = "rustc --release --bin imgpatchtools-rs -- -C target-feature=+crt-static"
+b-release-static = "rustc --release --bin imgpatchtools-rs -- -C target-feature=+crt-static"
