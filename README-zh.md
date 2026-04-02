@@ -5,6 +5,7 @@
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
 一个现代、跨平台、高性能的 Android OTA 补丁工具链的 Rust 实现。本项目旨在成为 AOSP `updater`、`blockimg`、`applypatch` 和 Edify 脚本运行时的一个二进制级别一致 (bit-exact) 的替代品。
+(纯AI生成,但人工测试了一周)
 
 ## 为什么需要这个项目？
 
@@ -204,6 +205,3 @@ imgpatchtools-rs batch\
 
 本项目基于 **GNU General Public License v3.0** 许可证。详情请参阅 `LICENSE` 文件。
 
-```
-
-```
