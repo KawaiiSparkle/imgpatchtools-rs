@@ -138,10 +138,7 @@ pub fn check_patch(source_path: &Path, target_sha1: &str) -> Result<bool> {
             Ok(matches)
         }
         Err(e) => {
-            log::warn!(
-                "check: cannot read {}: {e:#}",
-                source_path.display()
-            );
+            log::warn!("check: cannot read {}: {e:#}", source_path.display());
             Ok(false)
         }
     }
@@ -210,9 +207,7 @@ fn verify_result(result: &[u8], expected_sha1: &str, expected_size: u64) -> Resu
 /// * **Windows**: `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` provides the
 ///   same guarantee on NTFS.
 fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
-    let parent = target
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
 
     // Ensure parent directory exists.
     if !parent.exists() {
@@ -220,26 +215,21 @@ fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
             .with_context(|| format!("failed to create directory {}", parent.display()))?;
     }
 
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)
-        .context("failed to create temporary file")?;
+    let mut tmp =
+        tempfile::NamedTempFile::new_in(parent).context("failed to create temporary file")?;
 
     tmp.write_all(data)
         .context("failed to write to temporary file")?;
-    tmp.flush()
-        .context("failed to flush temporary file")?;
+    tmp.flush().context("failed to flush temporary file")?;
 
     // On Unix this also calls fsync. On Windows it calls
     // FlushFileBuffers.
-    tmp.as_file().sync_all()
+    tmp.as_file()
+        .sync_all()
         .context("failed to sync temporary file")?;
 
     tmp.persist(target)
-        .with_context(|| {
-            format!(
-                "failed to rename temporary file to {}",
-                target.display()
-            )
-        })?;
+        .with_context(|| format!("failed to rename temporary file to {}", target.display()))?;
 
     Ok(())
 }
@@ -265,8 +255,7 @@ mod tests {
     }
 
     fn bz2_compress(data: &[u8]) -> Vec<u8> {
-        let mut enc =
-            bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+        let mut enc = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
         enc.write_all(data).unwrap();
         enc.finish().unwrap()
     }
@@ -434,13 +423,7 @@ mod tests {
         let patch_path = write_temp(&dir, "patch.bin", b"NOT_A_PATCH");
         let target_path = dir.path().join("target.bin");
 
-        let result = apply_patch(
-            &source_path,
-            &target_path,
-            "abc",
-            5,
-            &patch_path,
-        );
+        let result = apply_patch(&source_path, &target_path, "abc", 5, &patch_path);
         assert!(result.is_err());
     }
 
@@ -452,13 +435,7 @@ mod tests {
         let target_path = dir.path().join("target.bin");
         let source_path = dir.path().join("nonexistent.bin");
 
-        let result = apply_patch(
-            &source_path,
-            &target_path,
-            "abc",
-            5,
-            &patch_path,
-        );
+        let result = apply_patch(&source_path, &target_path, "abc", 5, &patch_path);
         assert!(result.is_err());
     }
 
@@ -645,9 +622,7 @@ mod tests {
 
         // Generate non-trivial data.
         let source_data: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
-        let target_data: Vec<u8> = (0..4096)
-            .map(|i| ((i * 7 + 13) % 251) as u8)
-            .collect();
+        let target_data: Vec<u8> = (0..4096).map(|i| ((i * 7 + 13) % 251) as u8).collect();
         let patch_data = build_bsdiff_patch(&source_data, &target_data);
 
         let source_path = write_temp(&dir, "source.bin", &source_data);

@@ -304,10 +304,7 @@ fn parse_gzip(patch: &[u8], pos: &mut usize) -> Result<ImgdiffChunk> {
     *pos += gzip_header_len;
 
     // Target's gzip footer (CRC32 + ISIZE = 8 bytes).
-    ensure!(
-        *pos + 8 <= patch.len(),
-        "GZIP chunk footer overflows patch"
-    );
+    ensure!(*pos + 8 <= patch.len(), "GZIP chunk footer overflows patch");
     let mut gzip_footer = [0u8; 8];
     gzip_footer.copy_from_slice(&patch[*pos..*pos + 8]);
     *pos += 8;
@@ -344,21 +341,30 @@ fn read_deflate_params(patch: &[u8], pos: &mut usize) -> Result<DeflateParams> {
 // ---------------------------------------------------------------------------
 
 fn read_u32(data: &[u8], pos: &mut usize) -> Result<u32> {
-    ensure!(*pos + 4 <= data.len(), "unexpected end of patch reading u32");
+    ensure!(
+        *pos + 4 <= data.len(),
+        "unexpected end of patch reading u32"
+    );
     let val = LittleEndian::read_u32(&data[*pos..*pos + 4]);
     *pos += 4;
     Ok(val)
 }
 
 fn read_i32(data: &[u8], pos: &mut usize) -> Result<i32> {
-    ensure!(*pos + 4 <= data.len(), "unexpected end of patch reading i32");
+    ensure!(
+        *pos + 4 <= data.len(),
+        "unexpected end of patch reading i32"
+    );
     let val = LittleEndian::read_i32(&data[*pos..*pos + 4]);
     *pos += 4;
     Ok(val)
 }
 
 fn read_u64(data: &[u8], pos: &mut usize) -> Result<u64> {
-    ensure!(*pos + 8 <= data.len(), "unexpected end of patch reading u64");
+    ensure!(
+        *pos + 8 <= data.len(),
+        "unexpected end of patch reading u64"
+    );
     let val = LittleEndian::read_u64(&data[*pos..*pos + 8]);
     *pos += 8;
     Ok(val)
@@ -420,7 +426,10 @@ pub fn parse_gzip_header_len(data: &[u8]) -> Result<usize> {
 /// Find the next null byte starting at `start` and return the position
 /// **after** the null.
 fn find_null(data: &[u8], start: usize) -> Option<usize> {
-    data[start..].iter().position(|&b| b == 0).map(|i| start + i + 1)
+    data[start..]
+        .iter()
+        .position(|&b| b == 0)
+        .map(|i| start + i + 1)
 }
 
 // ===========================================================================

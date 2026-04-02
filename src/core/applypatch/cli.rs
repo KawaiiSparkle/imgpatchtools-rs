@@ -51,8 +51,8 @@ pub fn run(args: &ApplypatchArgs, verbose: bool) -> Result<()> {
 }
 
 fn run_check(args: &ApplypatchArgs) -> Result<()> {
-    let matches = apply::check_patch(&args.source, &args.target_sha1)
-        .context("check_patch failed")?;
+    let matches =
+        apply::check_patch(&args.source, &args.target_sha1).context("check_patch failed")?;
 
     if matches {
         log::info!(
@@ -96,8 +96,7 @@ mod tests {
     }
 
     fn bz2_compress(data: &[u8]) -> Vec<u8> {
-        let mut enc =
-            bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+        let mut enc = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
         enc.write_all(data).unwrap();
         enc.finish().unwrap()
     }

@@ -66,4 +66,3 @@ pub fn cmd_erase(ctx: &mut CommandContext, cmd: &TransferCommand) -> Result<()> 
     ctx.written_blocks += ranges.blocks();
     Ok(())
 }
-

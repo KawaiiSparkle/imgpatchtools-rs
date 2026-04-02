@@ -13,13 +13,13 @@
 //! | `GZIP`      | copy target gzip header → inflate → bsdiff → deflate →   |
 //! |             | copy target gzip footer                                   |
 
-use anyhow::{bail, ensure, Context, Result};
-use flate2::{Decompress, FlushDecompress};
 use super::bspatch;
 use super::imgdiff_format::{
     parse_gzip_header_len, parse_imgdiff_patch, DeflateParams, ImgdiffChunk,
 };
 use super::zlib_raw;
+use anyhow::{bail, ensure, Context, Result};
+use flate2::{Decompress, FlushDecompress};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -177,8 +177,7 @@ fn process_deflate(
         .context("DEFLATE chunk: bsdiff")?;
 
     // 3. Recompress with the exact parameters from the patch.
-    let recompressed = deflate_raw_exact(&patched, params)
-        .context("DEFLATE chunk: recompress")?;
+    let recompressed = deflate_raw_exact(&patched, params).context("DEFLATE chunk: recompress")?;
 
     output.extend_from_slice(&recompressed);
     Ok(())
@@ -207,8 +206,8 @@ fn process_gzip(
 
     // 2. Locate the raw deflate stream within the SOURCE gzip entry.
     let gzip_entry = source_slice(source, src_start, src_len)?;
-    let src_hdr_len = parse_gzip_header_len(gzip_entry)
-        .context("GZIP chunk: parse source gzip header")?;
+    let src_hdr_len =
+        parse_gzip_header_len(gzip_entry).context("GZIP chunk: parse source gzip header")?;
 
     ensure!(
         gzip_entry.len() >= src_hdr_len + 8,
@@ -228,8 +227,7 @@ fn process_gzip(
         .context("GZIP chunk: bsdiff")?;
 
     // 5. Recompress with the exact parameters recorded in the patch.
-    let recompressed = deflate_raw_exact(&patched, params)
-        .context("GZIP chunk: recompress")?;
+    let recompressed = deflate_raw_exact(&patched, params).context("GZIP chunk: recompress")?;
 
     output.extend_from_slice(&recompressed);
 
@@ -257,7 +255,11 @@ fn inflate_raw(compressed: &[u8], expected_len: usize) -> Result<Vec<u8>> {
         let before_out = dec.total_out() as usize;
 
         let status = dec
-            .decompress(compressed, &mut output[before_out..], FlushDecompress::Finish)
+            .decompress(
+                compressed,
+                &mut output[before_out..],
+                FlushDecompress::Finish,
+            )
             .context("raw inflate failed")?;
 
         match status {
@@ -273,9 +275,7 @@ fn inflate_raw(compressed: &[u8], expected_len: usize) -> Result<Vec<u8>> {
     let produced = dec.total_out() as usize;
 
     if expected_len > 0 && produced != expected_len {
-        bail!(
-            "inflate produced {produced} bytes but expected {expected_len}"
-        );
+        bail!("inflate produced {produced} bytes but expected {expected_len}");
     }
 
     output.truncate(produced);

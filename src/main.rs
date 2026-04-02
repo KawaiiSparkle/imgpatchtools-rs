@@ -8,12 +8,13 @@ use imgpatchtools_rs::core::applypatch::cli::ApplypatchArgs;
 use imgpatchtools_rs::core::batch::cli::BatchArgs;
 use imgpatchtools_rs::core::blockimg::cli::BlockimgArgs;
 use imgpatchtools_rs::core::edify::cli::EdifyArgs;
-use imgpatchtools_rs::core::super_img::cli::{LpmakeArgs, LpdumpArgs, LpunpackArgs, SuperArgs};
+use imgpatchtools_rs::core::super_img::cli::{LpdumpArgs, LpmakeArgs, LpunpackArgs, SuperArgs};
 
 const PROJECT_URL: &str = "https://github.com/KawaiiSparkle/imgpatchtools-rs";
 const WIKI_URL: &str = "https://github.com/KawaiiSparkle/imgpatchtools-rs/wiki";
 
-const COMPREHENSIVE_HELP: &str = "Run without arguments to see all commands and detailed usage examples.";
+const COMPREHENSIVE_HELP: &str =
+    "Run without arguments to see all commands and detailed usage examples.";
 
 /// Bit-exact, high-performance Rust reimplementation of AOSP imgpatchtools.
 #[derive(Parser, Debug)]
@@ -98,9 +99,12 @@ fn dispatch(cmd: Commands, verbose: bool) -> anyhow::Result<()> {
     match cmd {
         Commands::Blockimg(args) => imgpatchtools_rs::core::blockimg::cli::run(&args, verbose),
         Commands::Applypatch(args) => imgpatchtools_rs::core::applypatch::cli::run(&args, verbose),
-        Commands::Imgdiff { source, target, output, chunk_size } => {
-            imgpatchtools_rs::core::applypatch::imgdiff(&source, &target, &output, chunk_size)
-        }
+        Commands::Imgdiff {
+            source,
+            target,
+            output,
+            chunk_size,
+        } => imgpatchtools_rs::core::applypatch::imgdiff(&source, &target, &output, chunk_size),
         Commands::Edify(args) => imgpatchtools_rs::core::edify::cli::run(&args, verbose),
         Commands::Super(args) => imgpatchtools_rs::core::super_img::cli::run(&args),
         Commands::Lpmake(args) => imgpatchtools_rs::core::super_img::cli::run_lpmake(&args),

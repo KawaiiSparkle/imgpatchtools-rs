@@ -12,8 +12,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 
 use super::lp_metadata::{
-    LpMetadata, LP_PARTITION_RESERVED_BYTES, LP_METADATA_GEOMETRY_SIZE,
-    LP_SECTOR_SIZE, LP_TARGET_TYPE_LINEAR,
+    LpMetadata, LP_METADATA_GEOMETRY_SIZE, LP_PARTITION_RESERVED_BYTES, LP_SECTOR_SIZE,
+    LP_TARGET_TYPE_LINEAR,
 };
 use super::sparse;
 
@@ -63,7 +63,11 @@ pub fn write_super_image(
     images: &[(String, String)],
 ) -> Result<()> {
     let dev_size = metadata.block_devices[0].size;
-    log::info!("writing super.img (raw): {} bytes → {}", dev_size, output.display());
+    log::info!(
+        "writing super.img (raw): {} bytes → {}",
+        dev_size,
+        output.display()
+    );
 
     let file = std::fs::OpenOptions::new()
         .write(true)
@@ -123,8 +127,7 @@ pub fn write_super_image(
             continue;
         }
 
-        let src_file = File::open(img_path)
-            .with_context(|| format!("open image {}", img_path))?;
+        let src_file = File::open(img_path).with_context(|| format!("open image {}", img_path))?;
         let src_len = src_file.metadata()?.len();
         let mut reader = BufReader::with_capacity(1 << 20, src_file);
         let mut img_off: u64 = 0;
@@ -252,7 +255,6 @@ pub fn write_super_image_sparse(
             .partitions
             .iter()
             .position(|p| p.name_str() == part_name.as_str())
-
         {
             Some(i) => i,
             None => continue,
@@ -360,8 +362,7 @@ pub fn write_super_image_sparse(
                 pb.inc(chunk_bytes);
             }
             RegionSource::FileRange(path, offset, length) => {
-                let f = File::open(path)
-                    .with_context(|| format!("open {}", path))?;
+                let f = File::open(path).with_context(|| format!("open {}", path))?;
                 let mut reader = BufReader::with_capacity(1 << 20, f);
                 reader.seek(SeekFrom::Start(*offset))?;
 

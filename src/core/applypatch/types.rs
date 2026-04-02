@@ -97,9 +97,10 @@ impl FileContents {
     ///
     /// Returns an error if the file cannot be opened or mapped.
     pub fn from_file(path: &Path) -> anyhow::Result<Self> {
-        let file = File::open(path)
-            .with_context(|| format!("failed to open {}", path.display()))?;
-        let metadata = file.metadata()
+        let file =
+            File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        let metadata = file
+            .metadata()
             .with_context(|| format!("failed to stat {}", path.display()))?;
 
         if metadata.len() == 0 {
@@ -335,10 +336,7 @@ mod tests {
 
     #[test]
     fn from_parts_no_validation() {
-        let fc = FileContents::from_parts(
-            b"hello".to_vec(),
-            "fake_hash_not_checked".to_string(),
-        );
+        let fc = FileContents::from_parts(b"hello".to_vec(), "fake_hash_not_checked".to_string());
         assert_eq!(fc.sha1(), "fake_hash_not_checked");
         assert_eq!(fc.data(), b"hello");
     }

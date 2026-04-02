@@ -2,8 +2,8 @@ use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 
 use crate::core::blockimg::context::CommandContext;
-use crate::core::blockimg::transfer_list::{TransferCommand, TransferList};
 use crate::core::blockimg::ops;
+use crate::core::blockimg::transfer_list::{TransferCommand, TransferList};
 use crate::util::rangeset::RangeSet;
 
 /// Signature of a transfer-list command handler.
@@ -17,7 +17,9 @@ pub struct CommandRegistry {
 
 impl CommandRegistry {
     pub fn new() -> Self {
-        Self { map: HashMap::new() }
+        Self {
+            map: HashMap::new(),
+        }
     }
 
     pub fn register(&mut self, name: &'static str, f: CommandFn) {

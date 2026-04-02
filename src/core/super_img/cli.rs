@@ -10,8 +10,8 @@ use crate::core::super_img::builder::{
     auto_device_size, build_metadata, GroupInfo, PartitionInfo, SuperConfig,
 };
 use crate::core::super_img::lp_metadata::{
-    read_name, LpVersion, LP_DEFAULT_ALIGNMENT, LP_PARTITION_ATTR_READONLY,
-    LP_SECTOR_SIZE, LP_TARGET_TYPE_LINEAR,
+    read_name, LpVersion, LP_DEFAULT_ALIGNMENT, LP_PARTITION_ATTR_READONLY, LP_SECTOR_SIZE,
+    LP_TARGET_TYPE_LINEAR,
 };
 use crate::core::super_img::op_list::{parse_op_list, DynamicPartitionState};
 use crate::core::super_img::reader::read_metadata;
@@ -167,7 +167,9 @@ pub fn run(args: &SuperArgs) -> Result<()> {
     for p in &dp.partitions {
         let img_path = Path::new(&args.workdir).join(format!("{}.img", p.name));
         let actual_size = if img_path.exists() {
-            let file_len = fs::metadata(&img_path).context("stat partition image")?.len();
+            let file_len = fs::metadata(&img_path)
+                .context("stat partition image")?
+                .len();
             p.size.max(file_len)
         } else if p.size > 0 {
             log::warn!(
@@ -205,7 +207,11 @@ pub fn run(args: &SuperArgs) -> Result<()> {
     let mut extra_groups: Vec<GroupInfo> = Vec::new();
     for g_spec in &args.groups {
         let parts: Vec<&str> = g_spec.splitn(2, ':').collect();
-        ensure!(parts.len() == 2, "invalid group spec '{}', expected name:max_size", g_spec);
+        ensure!(
+            parts.len() == 2,
+            "invalid group spec '{}', expected name:max_size",
+            g_spec
+        );
         let name = parts[0].to_string();
         let max_size: u64 = parts[1].parse().context("parse group max_size")?;
         extra_groups.push(GroupInfo { name, max_size });
@@ -233,7 +239,11 @@ pub fn run(args: &SuperArgs) -> Result<()> {
         args.device_size
     } else {
         let sz = auto_device_size(&config);
-        log::info!("auto device_size: {} ({:.2} GB)", sz, sz as f64 / (1024.0 * 1024.0 * 1024.0));
+        log::info!(
+            "auto device_size: {} ({:.2} GB)",
+            sz,
+            sz as f64 / (1024.0 * 1024.0 * 1024.0)
+        );
         sz
     };
 
@@ -295,7 +305,8 @@ fn resolve_partitions(args: &SuperArgs) -> Result<DynamicPartitionState> {
     if let Some(ref dp_list_path) = args.dynamic_list {
         let content = fs::read_to_string(dp_list_path)
             .with_context(|| format!("read dynamic_list {}", dp_list_path.display()))?;
-        let names: Vec<&str> = content.lines()
+        let names: Vec<&str> = content
+            .lines()
             .map(|l| l.trim())
             .filter(|l| !l.is_empty() && !l.starts_with('#'))
             .collect();
@@ -309,18 +320,26 @@ fn resolve_partitions(args: &SuperArgs) -> Result<DynamicPartitionState> {
             } else {
                 0
             };
-            dp.partitions.push(crate::core::super_img::op_list::PartitionState {
-                name: name.to_string(),
-                group_name: "default".to_string(),
-                size,
-            });
+            dp.partitions
+                .push(crate::core::super_img::op_list::PartitionState {
+                    name: name.to_string(),
+                    group_name: "default".to_string(),
+                    size,
+                });
         }
-        ensure!(!dp.partitions.is_empty(), "no partitions found in dynamic_list");
+        ensure!(
+            !dp.partitions.is_empty(),
+            "no partitions found in dynamic_list"
+        );
         return Ok(dp);
     }
 
     if let Some(ref part_list) = args.partitions {
-        let names: Vec<&str> = part_list.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let names: Vec<&str> = part_list
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
         let mut dp = DynamicPartitionState::default();
         for name in names {
             let img_path = Path::new(&args.workdir).join(format!("{}.img", name));
@@ -331,11 +350,12 @@ fn resolve_partitions(args: &SuperArgs) -> Result<DynamicPartitionState> {
             } else {
                 0
             };
-            dp.partitions.push(crate::core::super_img::op_list::PartitionState {
-                name: name.to_string(),
-                group_name: "default".to_string(),
-                size,
-            });
+            dp.partitions
+                .push(crate::core::super_img::op_list::PartitionState {
+                    name: name.to_string(),
+                    group_name: "default".to_string(),
+                    size,
+                });
         }
         return Ok(dp);
     }
@@ -354,7 +374,8 @@ fn resolve_partitions(args: &SuperArgs) -> Result<DynamicPartitionState> {
         log::info!("auto-detected {} in workdir", dp_list_auto.display());
         let content = fs::read_to_string(&dp_list_auto)
             .with_context(|| format!("read {}", dp_list_auto.display()))?;
-        let names: Vec<&str> = content.lines()
+        let names: Vec<&str> = content
+            .lines()
             .map(|l| l.trim())
             .filter(|l| !l.is_empty() && !l.starts_with('#'))
             .collect();
@@ -365,14 +386,20 @@ fn resolve_partitions(args: &SuperArgs) -> Result<DynamicPartitionState> {
                 fs::metadata(&img_path)
                     .with_context(|| format!("stat {}", img_path.display()))?
                     .len()
-            } else { 0 };
-            dp.partitions.push(crate::core::super_img::op_list::PartitionState {
-                name: name.to_string(),
-                group_name: "default".to_string(),
-                size,
-            });
+            } else {
+                0
+            };
+            dp.partitions
+                .push(crate::core::super_img::op_list::PartitionState {
+                    name: name.to_string(),
+                    group_name: "default".to_string(),
+                    size,
+                });
         }
-        ensure!(!dp.partitions.is_empty(), "no partitions found in auto-detected dynamic_partitions_list");
+        ensure!(
+            !dp.partitions.is_empty(),
+            "no partitions found in auto-detected dynamic_partitions_list"
+        );
         return Ok(dp);
     }
 
@@ -407,14 +434,19 @@ fn scan_workdir(workdir: &str) -> Result<DynamicPartitionState> {
         let size = fs::metadata(dir.join(format!("{}.img", &name)))
             .map(|m| m.len())
             .unwrap_or(0);
-        dp.partitions.push(crate::core::super_img::op_list::PartitionState {
-            name,
-            group_name: "default".to_string(),
-            size,
-        });
+        dp.partitions
+            .push(crate::core::super_img::op_list::PartitionState {
+                name,
+                group_name: "default".to_string(),
+                size,
+            });
     }
 
-    ensure!(!dp.partitions.is_empty(), "no *.img files found in '{}'", workdir);
+    ensure!(
+        !dp.partitions.is_empty(),
+        "no *.img files found in '{}'",
+        workdir
+    );
     log::info!(
         "auto-detected {} partitions in '{}'",
         dp.partitions.len(),
@@ -445,7 +477,11 @@ pub fn run_lpmake(args: &LpmakeArgs) -> Result<()> {
     let mut groups: Vec<GroupInfo> = Vec::new();
     for g_spec in &args.group {
         let parts: Vec<&str> = g_spec.splitn(2, ':').collect();
-        ensure!(parts.len() == 2, "invalid group spec '{}', expected name:max_size", g_spec);
+        ensure!(
+            parts.len() == 2,
+            "invalid group spec '{}', expected name:max_size",
+            g_spec
+        );
         let name = parts[0].to_string();
         let max_size: u64 = parts[1].parse().context("parse group max_size")?;
         groups.push(GroupInfo { name, max_size });
@@ -464,7 +500,9 @@ pub fn run_lpmake(args: &LpmakeArgs) -> Result<()> {
         let group_name = parts[1].to_string();
         let size: u64 = parts[2].parse().context("parse partition size")?;
         let attributes: u32 = if parts.len() > 3 {
-            parts[3].parse::<u32>().context("parse partition attributes")?
+            parts[3]
+                .parse::<u32>()
+                .context("parse partition attributes")?
         } else {
             LP_PARTITION_ATTR_READONLY
         };
@@ -579,7 +617,11 @@ pub fn run_lpdump(args: &LpdumpArgs) -> Result<()> {
     for (i, bd) in metadata.block_devices.iter().enumerate() {
         let name = read_name(&bd.partition_name);
         println!("  [{}] {}", i, name);
-        println!("       Size:                {} ({:.2} GB)", bd.size, bd.size as f64 / (1024.0 * 1024.0 * 1024.0));
+        println!(
+            "       Size:                {} ({:.2} GB)",
+            bd.size,
+            bd.size as f64 / (1024.0 * 1024.0 * 1024.0)
+        );
         println!("       Alignment:           {}", bd.alignment);
         println!("       Alignment offset:    {}", bd.alignment_offset);
         println!("       First logical sector: {}", bd.first_logical_sector);
@@ -622,8 +664,15 @@ pub fn run_lpdump(args: &LpdumpArgs) -> Result<()> {
         println!("  [{}] {}", i, name);
         println!("       Group:      {}", group_name);
         println!("       Attributes: 0x{:08x}", p.attributes);
-        println!("       Size:       {} bytes ({:.1} MB)", size_bytes, size_bytes as f64 / 1048576.0);
-        println!("       Extents:    {} (linear={}, zero={})", p.num_extents, linear_extents, zero_extents);
+        println!(
+            "       Size:       {} bytes ({:.1} MB)",
+            size_bytes,
+            size_bytes as f64 / 1048576.0
+        );
+        println!(
+            "       Extents:    {} (linear={}, zero={})",
+            p.num_extents, linear_extents, zero_extents
+        );
 
         // Show extent details
         for j in 0..p.num_extents {
@@ -631,7 +680,10 @@ pub fn run_lpdump(args: &LpdumpArgs) -> Result<()> {
             if ext.target_type == LP_TARGET_TYPE_LINEAR {
                 let offset = ext.target_data * LP_SECTOR_SIZE;
                 let len = ext.num_sectors * LP_SECTOR_SIZE;
-                println!("         [{}] LINEAR  sector={} offset={} len={}", j, ext.target_data, offset, len);
+                println!(
+                    "         [{}] LINEAR  sector={} offset={} len={}",
+                    j, ext.target_data, offset, len
+                );
             } else {
                 let len = ext.num_sectors * LP_SECTOR_SIZE;
                 println!("         [{}] ZERO    len={}", j, len);
@@ -665,8 +717,8 @@ pub fn run_lpunpack(args: &LpunpackArgs) -> Result<()> {
     }
 
     // Read the raw file data.
-    let file_data = fs::read(&args.image)
-        .with_context(|| format!("read {}", args.image.display()))?;
+    let file_data =
+        fs::read(&args.image).with_context(|| format!("read {}", args.image.display()))?;
 
     let mut extracted = Vec::new();
     let mut skipped = Vec::new();
@@ -714,7 +766,10 @@ pub fn run_lpunpack(args: &LpunpackArgs) -> Result<()> {
             if end > file_data.len() {
                 log::warn!(
                     "partition '{}': extent at {} + {} exceeds file size {}, truncating",
-                    name, offset, len, file_data.len()
+                    name,
+                    offset,
+                    len,
+                    file_data.len()
                 );
                 let available = (file_data.len() as u64).saturating_sub(offset) as usize;
                 buf.extend_from_slice(&file_data[offset as usize..offset as usize + available]);
@@ -727,8 +782,7 @@ pub fn run_lpunpack(args: &LpunpackArgs) -> Result<()> {
 
         // Write to output file.
         let out_path = out_dir.join(format!("{}.img", &name));
-        fs::write(&out_path, &buf)
-            .with_context(|| format!("write {}", out_path.display()))?;
+        fs::write(&out_path, &buf).with_context(|| format!("write {}", out_path.display()))?;
 
         log::info!(
             "extracted '{}': {} bytes -> {}",
@@ -748,7 +802,12 @@ pub fn run_lpunpack(args: &LpunpackArgs) -> Result<()> {
     println!();
     println!("  Extracted ({}):", extracted.len());
     for (name, size) in &extracted {
-        println!("    {:<24} {:>12} bytes ({:.1} MB)", name, *size, *size as f64 / 1048576.0);
+        println!(
+            "    {:<24} {:>12} bytes ({:.1} MB)",
+            name,
+            *size,
+            *size as f64 / 1048576.0
+        );
     }
     if !skipped.is_empty() {
         println!();
@@ -768,7 +827,10 @@ pub fn run_lpunpack(args: &LpunpackArgs) -> Result<()> {
 /// Parse Android version string into LpVersion.
 fn parse_android_version(ver: &str) -> LpVersion {
     LpVersion::from_android_version(ver).unwrap_or_else(|| {
-        log::warn!("unknown Android version '{}', defaulting to v10.2 (Android 12+)", ver);
+        log::warn!(
+            "unknown Android version '{}', defaulting to v10.2 (Android 12+)",
+            ver
+        );
         LpVersion::V1_2
     })
 }

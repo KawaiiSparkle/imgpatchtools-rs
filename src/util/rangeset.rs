@@ -114,14 +114,9 @@ impl RangeSet {
         let tokens: Vec<&str> = s.split(',').collect();
         ensure!(!tokens.is_empty(), "empty range token list");
 
-        let count: usize = tokens[0]
-            .parse()
-            .context("invalid range count token")?;
+        let count: usize = tokens[0].parse().context("invalid range count token")?;
 
-        ensure!(
-            count % 2 == 0,
-            "range count must be even, got {count}"
-        );
+        ensure!(count % 2 == 0, "range count must be even, got {count}");
         ensure!(
             tokens.len() == count + 1,
             "expected {} tokens after count, found {}",
@@ -139,8 +134,7 @@ impl RangeSet {
             let end: u64 = tokens[2 + 2 * i]
                 .parse()
                 .with_context(|| format!("invalid range end at pair {i}"))?;
-            let r = Range::new(start, end)
-                .with_context(|| format!("invalid range at pair {i}"))?;
+            let r = Range::new(start, end).with_context(|| format!("invalid range at pair {i}"))?;
             ranges.push(r);
         }
 
@@ -901,9 +895,9 @@ mod tests {
         let rs = RangeSet::parse("4,0,2,5,8").unwrap();
         let parts = rs.split(2);
         assert_eq!(parts.len(), 3);
-        assert_eq!(parts[0].to_string(), "2,0,2");          // blocks 0,1
-        assert_eq!(parts[1].to_string(), "2,5,7");          // blocks 5,6
-        assert_eq!(parts[2].to_string(), "2,7,8");          // block  7
+        assert_eq!(parts[0].to_string(), "2,0,2"); // blocks 0,1
+        assert_eq!(parts[1].to_string(), "2,5,7"); // blocks 5,6
+        assert_eq!(parts[2].to_string(), "2,7,8"); // block  7
     }
 
     // ---- merge ------------------------------------------------------------

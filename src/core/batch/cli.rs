@@ -72,11 +72,17 @@ pub fn run(args: &BatchArgs) -> Result<()> {
     for spec in &args.cap {
         let parts: Vec<&str> = spec.splitn(2, '@').collect();
         if parts.len() != 2 {
-            anyhow::bail!("invalid --cap format '{}', expected PARTITION@INDEX (e.g. boot@1)", spec);
+            anyhow::bail!(
+                "invalid --cap format '{}', expected PARTITION@INDEX (e.g. boot@1)",
+                spec
+            );
         }
         let partition = parts[0].trim().to_string();
         let index: usize = parts[1].trim().parse().with_context(|| {
-            format!("invalid OTA index in --cap '{}', expected non-negative integer", spec)
+            format!(
+                "invalid OTA index in --cap '{}', expected non-negative integer",
+                spec
+            )
         })?;
         caps.insert(partition, index);
     }

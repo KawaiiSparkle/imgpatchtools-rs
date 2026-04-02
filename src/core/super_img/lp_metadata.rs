@@ -13,7 +13,7 @@ pub const LP_PARTITION_RESERVED_BYTES: u64 = 4096;
 pub const LP_METADATA_GEOMETRY_SIZE: u32 = 4096;
 
 // Alignment for partitions (1 MiB)
-pub const LP_DEFAULT_ALIGNMENT: u32 = 0x100000;  // 1 MiB
+pub const LP_DEFAULT_ALIGNMENT: u32 = 0x100000; // 1 MiB
 
 // Partition attributes
 pub const LP_PARTITION_ATTR_NONE: u32 = 0x0;
@@ -21,7 +21,7 @@ pub const LP_PARTITION_ATTR_READONLY: u32 = 0x1;
 
 // Magic values
 pub const LP_METADATA_GEOMETRY_MAGIC: u32 = 0x616C4467;
-pub const LP_METADATA_HEADER_MAGIC: u32 = 0x414C5030;  // on-disk LE bytes: "0PLA"
+pub const LP_METADATA_HEADER_MAGIC: u32 = 0x414C5030; // on-disk LE bytes: "0PLA"
 
 // Version constants
 pub const LP_METADATA_MAJOR_VERSION: u16 = 10;
@@ -42,9 +42,9 @@ pub const LP_PARTITION_NAME_LEN: usize = 36;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LpVersion {
-    V1_0,  // Android 10
-    V1_1,  // Android 11 (adds ATTR_UPDATED)
-    V1_2,  // Android 12+ (adds header flags)
+    V1_0, // Android 10
+    V1_1, // Android 11 (adds ATTR_UPDATED)
+    V1_2, // Android 12+ (adds header flags)
 }
 
 impl LpVersion {
@@ -96,7 +96,7 @@ pub struct LpMetadataTableDescriptor {
 
 impl LpMetadataTableDescriptor {
     pub const SIZE: usize = 12;
-    
+
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut buf = [0u8; Self::SIZE];
         buf[0..4].copy_from_slice(&self.offset.to_le_bytes());
@@ -138,7 +138,7 @@ impl LpMetadataGeometry {
         buf[48..52].copy_from_slice(&self.logical_block_size.to_le_bytes());
         buf
     }
-    
+
     /// Serialize and compute SHA256 checksum.
     /// AOSP: "SHA256 of this struct, with this field set to 0" — hashes only
     /// the first struct_size (52) bytes, NOT the full 4096-byte block.
@@ -186,13 +186,13 @@ impl LpMetadataHeader {
         buf[92..104].copy_from_slice(&self.extents.to_bytes());
         buf[104..116].copy_from_slice(&self.groups.to_bytes());
         buf[116..128].copy_from_slice(&self.block_devices.to_bytes());
-        
+
         // flags at offset 128, only for v1.2+ (header_size > 128)
         if self.header_size > 128 {
             buf[128..132].copy_from_slice(&self.flags.to_le_bytes());
             // bytes 132..256 are reserved and left as zeros
         }
-        
+
         buf
     }
 }
@@ -212,14 +212,13 @@ pub struct LpMetadataPartition {
 
 impl LpMetadataPartition {
     pub const SIZE: usize = 52;
-    
+
     pub fn new(name: &str, attributes: u32, group_index: u32) -> Self {
         let mut name_bytes = [0u8; LP_PARTITION_NAME_LEN];
         let bytes = name.as_bytes();
-        name_bytes[..bytes.len().min(LP_PARTITION_NAME_LEN)].copy_from_slice(
-            &bytes[..bytes.len().min(LP_PARTITION_NAME_LEN)]
-        );
-        
+        name_bytes[..bytes.len().min(LP_PARTITION_NAME_LEN)]
+            .copy_from_slice(&bytes[..bytes.len().min(LP_PARTITION_NAME_LEN)]);
+
         Self {
             name: name_bytes,
             attributes,
@@ -228,7 +227,7 @@ impl LpMetadataPartition {
             group_index,
         }
     }
-    
+
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut buf = [0u8; Self::SIZE];
         buf[..LP_PARTITION_NAME_LEN].copy_from_slice(&self.name);
@@ -238,9 +237,13 @@ impl LpMetadataPartition {
         buf[48..52].copy_from_slice(&self.group_index.to_le_bytes());
         buf
     }
-    
+
     pub fn name_str(&self) -> String {
-        let null_pos = self.name.iter().position(|&b| b == 0).unwrap_or(LP_PARTITION_NAME_LEN);
+        let null_pos = self
+            .name
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(LP_PARTITION_NAME_LEN);
         String::from_utf8_lossy(&self.name[..null_pos]).to_string()
     }
 }
@@ -259,7 +262,7 @@ pub struct LpMetadataExtent {
 
 impl LpMetadataExtent {
     pub const SIZE: usize = 24;
-    
+
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut buf = [0u8; Self::SIZE];
         buf[0..8].copy_from_slice(&self.num_sectors.to_le_bytes());
@@ -283,21 +286,20 @@ pub struct LpMetadataPartitionGroup {
 
 impl LpMetadataPartitionGroup {
     pub const SIZE: usize = 48;
-    
+
     pub fn new(name: &str, maximum_size: u64) -> Self {
         let mut name_bytes = [0u8; LP_PARTITION_NAME_LEN];
         let bytes = name.as_bytes();
-        name_bytes[..bytes.len().min(LP_PARTITION_NAME_LEN)].copy_from_slice(
-            &bytes[..bytes.len().min(LP_PARTITION_NAME_LEN)]
-        );
-        
+        name_bytes[..bytes.len().min(LP_PARTITION_NAME_LEN)]
+            .copy_from_slice(&bytes[..bytes.len().min(LP_PARTITION_NAME_LEN)]);
+
         Self {
             name: name_bytes,
             flags: 0,
             maximum_size,
         }
     }
-    
+
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut buf = [0u8; Self::SIZE];
         buf[..LP_PARTITION_NAME_LEN].copy_from_slice(&self.name);
@@ -305,9 +307,13 @@ impl LpMetadataPartitionGroup {
         buf[40..48].copy_from_slice(&self.maximum_size.to_le_bytes());
         buf
     }
-    
+
     pub fn name_str(&self) -> String {
-        let null_pos = self.name.iter().position(|&b| b == 0).unwrap_or(LP_PARTITION_NAME_LEN);
+        let null_pos = self
+            .name
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(LP_PARTITION_NAME_LEN);
         String::from_utf8_lossy(&self.name[..null_pos]).to_string()
     }
 }
@@ -328,7 +334,7 @@ pub struct LpMetadataBlockDevice {
 
 impl LpMetadataBlockDevice {
     pub const SIZE: usize = 64;
-    
+
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut buf = [0u8; Self::SIZE];
         buf[0..8].copy_from_slice(&self.first_logical_sector.to_le_bytes());
@@ -360,7 +366,10 @@ pub struct LpMetadata {
 // ---------------------------------------------------------------------------
 
 pub fn read_name(bytes: &[u8; LP_PARTITION_NAME_LEN]) -> String {
-    let null_pos = bytes.iter().position(|&b| b == 0).unwrap_or(LP_PARTITION_NAME_LEN);
+    let null_pos = bytes
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(LP_PARTITION_NAME_LEN);
     String::from_utf8_lossy(&bytes[..null_pos]).to_string()
 }
 
@@ -375,7 +384,13 @@ pub fn r32(buf: &[u8], off: usize) -> u32 {
 
 pub fn r64(buf: &[u8], off: usize) -> u64 {
     u64::from_le_bytes([
-        buf[off], buf[off + 1], buf[off + 2], buf[off + 3],
-        buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7],
+        buf[off],
+        buf[off + 1],
+        buf[off + 2],
+        buf[off + 3],
+        buf[off + 4],
+        buf[off + 5],
+        buf[off + 6],
+        buf[off + 7],
     ])
 }

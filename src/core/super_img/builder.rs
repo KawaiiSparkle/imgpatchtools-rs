@@ -64,12 +64,16 @@ impl Default for SuperConfig {
 
 pub fn build_metadata(config: &SuperConfig) -> Result<LpMetadata> {
     ensure!(config.device_size > 0, "device_size must be > 0");
-    ensure!(config.device_size.is_multiple_of(LP_SECTOR_SIZE),
-        "device_size must be multiple of 512");
+    ensure!(
+        config.device_size.is_multiple_of(LP_SECTOR_SIZE),
+        "device_size must be multiple of 512"
+    );
     ensure!(config.metadata_max_size >= 512, "metadata_max_size >= 512");
     ensure!(config.metadata_slots >= 1, "metadata_slots >= 1");
-    ensure!(config.alignment > 0 && (config.alignment as u64).is_multiple_of(LP_SECTOR_SIZE),
-        "alignment must be positive multiple of 512");
+    ensure!(
+        config.alignment > 0 && (config.alignment as u64).is_multiple_of(LP_SECTOR_SIZE),
+        "alignment must be positive multiple of 512"
+    );
 
     // first_logical_sector
     let metadata_region = LP_PARTITION_RESERVED_BYTES
@@ -78,8 +82,10 @@ pub fn build_metadata(config: &SuperConfig) -> Result<LpMetadata> {
 
     let first_logical_sector = align_up(metadata_region, config.alignment as u64) / LP_SECTOR_SIZE;
 
-    ensure!(first_logical_sector * LP_SECTOR_SIZE < config.device_size,
-        "metadata region exceeds device_size");
+    ensure!(
+        first_logical_sector * LP_SECTOR_SIZE < config.device_size,
+        "metadata region exceeds device_size"
+    );
 
     // Groups: index 0 = "default"
     let mut groups = Vec::new();
@@ -109,11 +115,17 @@ pub fn build_metadata(config: &SuperConfig) -> Result<LpMetadata> {
         let mut part = LpMetadataPartition::new(&p.name, p.attributes, gidx);
 
         if p.size > 0 {
-            cur_sector = align_up(cur_sector * LP_SECTOR_SIZE, config.alignment as u64) / LP_SECTOR_SIZE;
+            cur_sector =
+                align_up(cur_sector * LP_SECTOR_SIZE, config.alignment as u64) / LP_SECTOR_SIZE;
             let num_sectors = align_up(p.size, LP_SECTOR_SIZE) / LP_SECTOR_SIZE;
             let end_byte = (cur_sector + num_sectors) * LP_SECTOR_SIZE;
-            ensure!(end_byte <= config.device_size,
-                "partition '{}' (size={}) exceeds device_size {}", p.name, p.size, config.device_size);
+            ensure!(
+                end_byte <= config.device_size,
+                "partition '{}' (size={}) exceeds device_size {}",
+                p.name,
+                p.size,
+                config.device_size
+            );
 
             part.first_extent_index = extents.len() as u32;
             part.num_extents = 1;
@@ -145,13 +157,21 @@ pub fn build_metadata(config: &SuperConfig) -> Result<LpMetadata> {
     // Serialize tables
     let mut tables: Vec<u8> = Vec::new();
     let p_off: u32 = 0;
-    for p in &partitions { tables.extend_from_slice(&p.to_bytes()[..]); }
+    for p in &partitions {
+        tables.extend_from_slice(&p.to_bytes()[..]);
+    }
     let e_off: u32 = tables.len() as u32;
-    for e in &extents { tables.extend_from_slice(&e.to_bytes()[..]); }
+    for e in &extents {
+        tables.extend_from_slice(&e.to_bytes()[..]);
+    }
     let g_off: u32 = tables.len() as u32;
-    for g in &groups { tables.extend_from_slice(&g.to_bytes()[..]); }
+    for g in &groups {
+        tables.extend_from_slice(&g.to_bytes()[..]);
+    }
     let bd_off: u32 = tables.len() as u32;
-    for bd in &block_devices { tables.extend_from_slice(&bd.to_bytes()[..]); } 
+    for bd in &block_devices {
+        tables.extend_from_slice(&bd.to_bytes()[..]);
+    }
     let tables_size: u32 = tables.len() as u32;
 
     let tables_checksum: [u8; 32] = Sha256::digest(&tables).into();
@@ -168,19 +188,23 @@ pub fn build_metadata(config: &SuperConfig) -> Result<LpMetadata> {
         tables_size,
         tables_checksum,
         partitions: LpMetadataTableDescriptor {
-            offset: p_off, num_entries: partitions.len() as u32,
+            offset: p_off,
+            num_entries: partitions.len() as u32,
             entry_size: LpMetadataPartition::SIZE as u32,
         },
         extents: LpMetadataTableDescriptor {
-            offset: e_off, num_entries: extents.len() as u32,
+            offset: e_off,
+            num_entries: extents.len() as u32,
             entry_size: LpMetadataExtent::SIZE as u32,
         },
         groups: LpMetadataTableDescriptor {
-            offset: g_off, num_entries: groups.len() as u32,
+            offset: g_off,
+            num_entries: groups.len() as u32,
             entry_size: LpMetadataPartitionGroup::SIZE as u32,
         },
         block_devices: LpMetadataTableDescriptor {
-            offset: bd_off, num_entries: block_devices.len() as u32,
+            offset: bd_off,
+            num_entries: block_devices.len() as u32,
             entry_size: LpMetadataBlockDevice::SIZE as u32,
         },
         flags: config.header_flags,
@@ -205,10 +229,21 @@ pub fn build_metadata(config: &SuperConfig) -> Result<LpMetadata> {
     };
 
     let total = header_size as usize + tables.len();
-    ensure!(total <= config.metadata_max_size as usize,
-        "metadata blob ({} bytes) exceeds metadata_max_size ({})", total, config.metadata_max_size);
+    ensure!(
+        total <= config.metadata_max_size as usize,
+        "metadata blob ({} bytes) exceeds metadata_max_size ({})",
+        total,
+        config.metadata_max_size
+    );
 
-    Ok(LpMetadata { geometry, header, partitions, extents, groups, block_devices })
+    Ok(LpMetadata {
+        geometry,
+        header,
+        partitions,
+        extents,
+        groups,
+        block_devices,
+    })
 }
 
 /// Calculate minimum device_size for a given config.
@@ -250,7 +285,13 @@ pub fn auto_device_size(config: &SuperConfig) -> u64 {
 }
 
 fn align_up(v: u64, a: u64) -> u64 {
-    if a == 0 { return v; }
+    if a == 0 {
+        return v;
+    }
     let r = v % a;
-    if r == 0 { v } else { v + (a - r) }
+    if r == 0 {
+        v
+    } else {
+        v + (a - r)
+    }
 }

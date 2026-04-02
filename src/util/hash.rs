@@ -209,10 +209,10 @@ fn hex_digest<D: Digest>(data: &[u8]) -> String {
 
 /// Generic file hasher using `memmap2`.
 fn hash_file<D: Digest>(path: &Path) -> Result<String> {
-    let file = File::open(path)
-        .with_context(|| format!("failed to open {}", path.display()))?;
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
 
-    let metadata = file.metadata()
+    let metadata = file
+        .metadata()
         .with_context(|| format!("failed to stat {}", path.display()))?;
 
     if metadata.len() == 0 {
@@ -225,8 +225,7 @@ fn hash_file<D: Digest>(path: &Path) -> Result<String> {
     // `memmap2` is a required project dependency specifically for this
     // high-performance I/O path.
     let mmap = unsafe {
-        memmap2::Mmap::map(&file)
-            .with_context(|| format!("failed to mmap {}", path.display()))?
+        memmap2::Mmap::map(&file).with_context(|| format!("failed to mmap {}", path.display()))?
     };
 
     Ok(hex_digest::<D>(&mmap))
@@ -236,11 +235,7 @@ fn hash_file<D: Digest>(path: &Path) -> Result<String> {
 ///
 /// Feeds each range `[start * block_size, end * block_size)` into the
 /// digest **in order**, then finalizes.
-fn hash_ranges<D: Digest>(
-    data: &[u8],
-    ranges: &RangeSet,
-    block_size: usize,
-) -> Result<String> {
+fn hash_ranges<D: Digest>(data: &[u8], ranges: &RangeSet, block_size: usize) -> Result<String> {
     ensure!(block_size > 0, "block_size must be positive");
 
     let mut hasher = D::new();
@@ -266,9 +261,7 @@ fn hash_ranges<D: Digest>(
 #[inline]
 fn checked_block_offset(block: u64, block_size: usize) -> Result<usize> {
     let bs = block_size as u64;
-    let byte_offset = block
-        .checked_mul(bs)
-        .context("block offset overflow")?;
+    let byte_offset = block.checked_mul(bs).context("block offset overflow")?;
     usize::try_from(byte_offset).context("block offset exceeds addressable range")
 }
 
@@ -287,10 +280,8 @@ mod tests {
     const SHA1_EMPTY: &str = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
     const SHA1_ABC: &str = "a9993e364706816aba3e25717850c26c9cd0d89d";
 
-    const SHA256_EMPTY: &str =
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-    const SHA256_ABC: &str =
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    const SHA256_EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    const SHA256_ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
     // ---- sha1_hex / sha256_hex -------------------------------------------
 

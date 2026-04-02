@@ -50,8 +50,7 @@ pub trait ProgressReporter: Send {
 /// Progress bar template used for block-based operations.
 ///
 /// Layout:  `stage [████████░░░░] 1234/5678 blocks (23%) 456.7 blocks/s ETA 00:12`
-const BAR_TEMPLATE: &str =
-    "{prefix:>12.cyan.bold} [{bar:40.green/dark_gray}] \
+const BAR_TEMPLATE: &str = "{prefix:>12.cyan.bold} [{bar:40.green/dark_gray}] \
      {pos}/{len} blocks ({percent}%) {per_sec} ETA {eta}";
 
 /// Progress bar characters: filled, current, empty.
@@ -85,7 +84,6 @@ impl ConsoleProgress {
         bar.set_style(style);
         Ok(Self { bar })
     }
-
 }
 
 impl ProgressReporter for ConsoleProgress {

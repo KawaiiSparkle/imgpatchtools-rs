@@ -147,7 +147,10 @@ fn print_dry_run(packages: &[OtaPackage], config: &BatchConfig) {
     println!("  Workdir:       {}", config.workdir);
     println!("  Output dir:    {}", config.output_dir);
     println!("  Threads:       {}", config.threads);
-    println!("  Build super:   {}", if config.no_super { "no" } else { "yes" });
+    println!(
+        "  Build super:   {}",
+        if config.no_super { "no" } else { "yes" }
+    );
     println!();
 
     if !config.excludes.is_empty() {
@@ -164,8 +167,7 @@ fn print_dry_run(packages: &[OtaPackage], config: &BatchConfig) {
     println!("  Execution plan:");
     for pkg in packages {
         let label = if pkg.is_full { "FULL" } else { "INC " };
-        println!("    [{}] OTA #{}: {}",
-            label, pkg.index, pkg.path.display());
+        println!("    [{}] OTA #{}: {}", label, pkg.index, pkg.path.display());
 
         // Show which partitions would be excluded at this step.
         let excluded_here = partitions_excluded_at(pkg.index, config);
@@ -186,8 +188,7 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
     let workdir = Path::new(&config.workdir);
 
     // Create top-level workdir.
-    fs::create_dir_all(workdir)
-        .with_context(|| format!("create workdir {}", workdir.display()))?;
+    fs::create_dir_all(workdir).with_context(|| format!("create workdir {}", workdir.display()))?;
 
     println!();
     println!("╔══════════════════════════════════════════════════════╗");
@@ -205,11 +206,14 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
 
     for pkg in packages {
         let ota_dir = workdir.join(format!("ota_{:03}", pkg.index));
-        let label = if pkg.is_full { "full OTA" } else { "incremental OTA" };
+        let label = if pkg.is_full {
+            "full OTA"
+        } else {
+            "incremental OTA"
+        };
 
         println!("──────────────────────────────────────────────────");
-        println!("[OTA #{}] Processing {} ({})",
-            pkg.index, label, pkg.name);
+        println!("[OTA #{}] Processing {} ({})", pkg.index, label, pkg.name);
         println!("  Source: {}", pkg.path.display());
         println!("  Workdir: {}", ota_dir.display());
 
@@ -220,7 +224,10 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
 
         // Step 2: Copy source images from previous OTA (for incremental).
         if let Some(ref prev) = prev_workdir {
-            println!("  [2/4] Copying source images from OTA #{}...", pkg.index - 1);
+            println!(
+                "  [2/4] Copying source images from OTA #{}...",
+                pkg.index - 1
+            );
             copy_source_images(prev, &ota_dir)?;
         } else {
             println!("  [2/4] No previous OTA (full package), skipping copy.");
@@ -243,13 +250,18 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
             .with_context(|| format!("read {}", script_path.display()))?;
 
         // Pre-scan: check if script references .dat.br or .dat.lzma files.
-        let has_compressed_data = script_content.contains(".dat.br")
-            || script_content.contains(".dat.lzma");
+        let has_compressed_data =
+            script_content.contains(".dat.br") || script_content.contains(".dat.lzma");
 
         let offline = has_compressed_data || !pkg.is_full;
         let registry = builtin_registry();
-        let result = run_script_offline(&script_content, &registry, &ota_dir.to_string_lossy(), offline)
-            .with_context(|| format!("edify execution for OTA #{}", pkg.index))?;
+        let result = run_script_offline(
+            &script_content,
+            &registry,
+            &ota_dir.to_string_lossy(),
+            offline,
+        )
+        .with_context(|| format!("edify execution for OTA #{}", pkg.index))?;
 
         // Restore excluded partitions.
         if !excluded.is_empty() {
@@ -326,7 +338,11 @@ fn extract_ota_zip(zip_path: &Path, dest_dir: &Path) -> Result<()> {
             Ok(())
         }
         Ok(s) => {
-            bail!("7z exited with code {:?} while extracting {}", s.code(), zip_path.display())
+            bail!(
+                "7z exited with code {:?} while extracting {}",
+                s.code(),
+                zip_path.display()
+            )
         }
         Err(e) => {
             bail!(
@@ -353,9 +369,8 @@ fn copy_source_images(prev_dir: &Path, ota_dir: &Path) -> Result<()> {
         if path.extension().and_then(|e| e.to_str()) == Some("img") {
             let dest = ota_dir.join(entry.file_name());
             if !dest.exists() {
-                fs::copy(&path, &dest).with_context(|| {
-                    format!("copy {} → {}", path.display(), dest.display())
-                })?;
+                fs::copy(&path, &dest)
+                    .with_context(|| format!("copy {} → {}", path.display(), dest.display()))?;
                 log::info!("copied source: {} → {}", path.display(), dest.display());
             }
         }
@@ -399,9 +414,8 @@ fn save_and_exclude_partitions(excluded: &[String], ota_dir: &Path) -> Result<()
         let img_path = ota_dir.join(format!("{}.img", part));
         let bak_path = backup_dir.join(format!("{}.img", part));
         if img_path.exists() {
-            fs::copy(&img_path, &bak_path).with_context(|| {
-                format!("backup {}", img_path.display())
-            })?;
+            fs::copy(&img_path, &bak_path)
+                .with_context(|| format!("backup {}", img_path.display()))?;
             log::info!("backed up {}.img for exclusion", part);
         }
     }
@@ -415,9 +429,8 @@ fn restore_excluded_partitions(excluded: &[String], ota_dir: &Path) -> Result<()
         let img_path = ota_dir.join(format!("{}.img", part));
         let bak_path = backup_dir.join(format!("{}.img", part));
         if bak_path.exists() {
-            fs::copy(&bak_path, &img_path).with_context(|| {
-                format!("restore {}", img_path.display())
-            })?;
+            fs::copy(&bak_path, &img_path)
+                .with_context(|| format!("restore {}", img_path.display()))?;
             log::info!("restored {}.img after exclusion", part);
         }
     }
@@ -450,10 +463,7 @@ fn find_updater_script(workdir: &Path) -> Result<PathBuf> {
     if meta_inf.is_dir() {
         for entry in walkdir_nested(&meta_inf)? {
             let name = entry.file_name();
-            if name.is_some_and(|n| {
-                n == "updater-script" || n == "update-script"
-            })
-            {
+            if name.is_some_and(|n| n == "updater-script" || n == "update-script") {
                 return Ok(entry);
             }
         }
@@ -494,9 +504,7 @@ fn scan_ota_partitions(ota_path: &Path) -> Result<Vec<String>> {
         .output();
 
     let script_text = match output {
-        Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout).to_string()
-        }
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).to_string(),
         Ok(_) => {
             // Try alternative script paths.
             let alt_output = std::process::Command::new("7z")
@@ -506,9 +514,7 @@ fn scan_ota_partitions(ota_path: &Path) -> Result<Vec<String>> {
                 .arg("META-INF/com/android/updater-script")
                 .output();
             match alt_output {
-                Ok(out) if out.status.success() => {
-                    String::from_utf8_lossy(&out.stdout).to_string()
-                }
+                Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).to_string(),
                 _ => {
                     // Try listing and finding any script.
                     return scan_partitions_from_listing(ota_path);
@@ -579,7 +585,10 @@ fn extract_partition_names(script: &str) -> Vec<String> {
             .find(|c: char| c == '"' || c == ')' || c == ',' || c == ' ' || c == '\n')
             .unwrap_or(rest.len());
         let name = rest[..end].trim();
-        if !name.is_empty() && name.len() < 64 && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        if !name.is_empty()
+            && name.len() < 64
+            && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+        {
             partitions.insert(name.to_string());
         }
     }
@@ -596,11 +605,14 @@ fn extract_partition_names(script: &str) -> Vec<String> {
         for part in script.split(suffix) {
             let trimmed = part.trim_end_matches(|c: char| c.is_whitespace());
             // Find the last "word" before the suffix.
-            if let Some(pos) = trimmed.rfind(|c: char| c == '"' || c == '(' || c == '/' || c == ' ') {
+            if let Some(pos) = trimmed.rfind(|c: char| c == '"' || c == '(' || c == '/' || c == ' ')
+            {
                 let name = trimmed[pos + 1..].trim();
                 if !name.is_empty()
                     && name.len() < 64
-                    && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                    && name
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
                 {
                     partitions.insert(name.to_string());
                 }
@@ -629,9 +641,8 @@ fn copy_final_images(workdir: &Path, output_dir: &Path) -> Result<()> {
                 let dest = output_dir.join(entry.file_name());
                 // Copy only if newer or doesn't exist.
                 if !dest.exists() {
-                    fs::copy(&path, &dest).with_context(|| {
-                        format!("copy {} → {}", path.display(), dest.display())
-                    })?;
+                    fs::copy(&path, &dest)
+                        .with_context(|| format!("copy {} → {}", path.display(), dest.display()))?;
                     log::info!("output: {}", dest.display());
                 } else {
                     log::info!("skip (exists): {}", dest.display());
@@ -699,8 +710,7 @@ fn build_super_from_batch(
     // Build a temporary op_list file from the DP state and pass it.
     let op_list_content = serialize_dp_to_op_list(dp);
     let tmp_op_list = workdir.join(".batch_dynamic_op_list.txt");
-    fs::write(&tmp_op_list, &op_list_content)
-        .context("write temporary op_list")?;
+    fs::write(&tmp_op_list, &op_list_content).context("write temporary op_list")?;
 
     let args_with_op_list = SuperArgs {
         op_list: Some(tmp_op_list.clone()),

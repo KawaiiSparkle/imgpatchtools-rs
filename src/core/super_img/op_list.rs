@@ -23,7 +23,9 @@ pub struct DynamicPartitionState {
 }
 
 impl DynamicPartitionState {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn total_size(&self) -> u64 {
         self.partitions.iter().map(|p| p.size).sum()
@@ -47,7 +49,9 @@ pub fn parse_op_list(content: &str) -> Result<DynamicPartitionState> {
             continue;
         }
         let t: Vec<&str> = line.split_whitespace().collect();
-        if t.is_empty() { continue; }
+        if t.is_empty() {
+            continue;
+        }
 
         let ctx = || format!("line {}: {:?}", ln + 1, line);
 
@@ -57,15 +61,22 @@ pub fn parse_op_list(content: &str) -> Result<DynamicPartitionState> {
                 s.groups.clear();
             }
             "add_group" => {
-                if t.len() < 3 { bail!("add_group needs 2 args ({})", ctx()); }
+                if t.len() < 3 {
+                    bail!("add_group needs 2 args ({})", ctx());
+                }
                 let max: u64 = t[2].parse().with_context(ctx)?;
                 if s.find_group(t[1]).is_some() {
                     bail!("add_group: '{}' exists ({})", t[1], ctx());
                 }
-                s.groups.push(GroupState { name: t[1].into(), max_size: max });
+                s.groups.push(GroupState {
+                    name: t[1].into(),
+                    max_size: max,
+                });
             }
             "remove_group" => {
-                if t.len() < 2 { bail!("remove_group needs 1 arg ({})", ctx()); }
+                if t.len() < 2 {
+                    bail!("remove_group needs 1 arg ({})", ctx());
+                }
                 if s.partitions.iter().any(|p| p.group_name == t[1]) {
                     bail!("remove_group: '{}' not empty ({})", t[1], ctx());
                 }
@@ -76,14 +87,23 @@ pub fn parse_op_list(content: &str) -> Result<DynamicPartitionState> {
                 }
             }
             "resize_group" => {
-                if t.len() < 3 { bail!("resize_group needs 2 args ({})", ctx()); }
+                if t.len() < 3 {
+                    bail!("resize_group needs 2 args ({})", ctx());
+                }
                 let max: u64 = t[2].parse().with_context(ctx)?;
-                let g = s.groups.iter_mut().find(|g| g.name == t[1])
-                    .ok_or_else(|| anyhow::anyhow!("resize_group: '{}' not found ({})", t[1], ctx()))?;
+                let g = s
+                    .groups
+                    .iter_mut()
+                    .find(|g| g.name == t[1])
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("resize_group: '{}' not found ({})", t[1], ctx())
+                    })?;
                 g.max_size = max;
             }
             "add" => {
-                if t.len() < 3 { bail!("add needs 2 args ({})", ctx()); }
+                if t.len() < 3 {
+                    bail!("add needs 2 args ({})", ctx());
+                }
                 if s.find_group(t[2]).is_none() {
                     bail!("add: group '{}' not found ({})", t[2], ctx());
                 }
@@ -97,11 +117,15 @@ pub fn parse_op_list(content: &str) -> Result<DynamicPartitionState> {
                     0
                 };
                 s.partitions.push(PartitionState {
-                    name: t[1].into(), group_name: t[2].into(), size: sz,
+                    name: t[1].into(),
+                    group_name: t[2].into(),
+                    size: sz,
                 });
             }
             "remove" => {
-                if t.len() < 2 { bail!("remove needs 1 arg ({})", ctx()); }
+                if t.len() < 2 {
+                    bail!("remove needs 1 arg ({})", ctx());
+                }
                 let before = s.partitions.len();
                 s.partitions.retain(|p| p.name != t[1]);
                 if s.partitions.len() == before {
@@ -109,18 +133,28 @@ pub fn parse_op_list(content: &str) -> Result<DynamicPartitionState> {
                 }
             }
             "resize" => {
-                if t.len() < 3 { bail!("resize needs 2 args ({})", ctx()); }
+                if t.len() < 3 {
+                    bail!("resize needs 2 args ({})", ctx());
+                }
                 let sz: u64 = t[2].parse().with_context(ctx)?;
-                let p = s.partitions.iter_mut().find(|p| p.name == t[1])
+                let p = s
+                    .partitions
+                    .iter_mut()
+                    .find(|p| p.name == t[1])
                     .ok_or_else(|| anyhow::anyhow!("resize: '{}' not found ({})", t[1], ctx()))?;
                 p.size = sz;
             }
             "move" => {
-                if t.len() < 3 { bail!("move needs 2 args ({})", ctx()); }
+                if t.len() < 3 {
+                    bail!("move needs 2 args ({})", ctx());
+                }
                 if s.find_group(t[2]).is_none() {
                     bail!("move: group '{}' not found ({})", t[2], ctx());
                 }
-                let p = s.partitions.iter_mut().find(|p| p.name == t[1])
+                let p = s
+                    .partitions
+                    .iter_mut()
+                    .find(|p| p.name == t[1])
                     .ok_or_else(|| anyhow::anyhow!("move: '{}' not found ({})", t[1], ctx()))?;
                 p.group_name = t[2].into();
             }
@@ -128,8 +162,11 @@ pub fn parse_op_list(content: &str) -> Result<DynamicPartitionState> {
         }
     }
 
-    log::info!("op_list: {} groups, {} partitions, {} bytes total",
-        s.groups.len(), s.partitions.len(), s.total_size());
+    log::info!(
+        "op_list: {} groups, {} partitions, {} bytes total",
+        s.groups.len(),
+        s.partitions.len(),
+        s.total_size()
+    );
     Ok(s)
 }
-

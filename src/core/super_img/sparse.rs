@@ -7,8 +7,8 @@
 //!
 //! Reference: `system/core/libsparse/sparse_format.h` in AOSP.
 
-use std::io::Write;
 use anyhow::{Context, Result};
+use std::io::Write;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -63,17 +63,18 @@ fn write_chunk_header<W: Write>(
 
 /// Write a DONT_CARE chunk (no data payload — just the 12-byte header).
 pub fn write_dont_care_chunk<W: Write>(w: &mut W, num_blocks: u32) -> Result<()> {
-    write_chunk_header(w, CHUNK_TYPE_DONT_CARE, num_blocks, CHUNK_HEADER_SIZE as u32)
-        .context("write DONT_CARE chunk header")
+    write_chunk_header(
+        w,
+        CHUNK_TYPE_DONT_CARE,
+        num_blocks,
+        CHUNK_HEADER_SIZE as u32,
+    )
+    .context("write DONT_CARE chunk header")
 }
 
 /// Write a RAW chunk header.  The caller must write exactly
 /// `num_blocks * block_size` bytes of payload immediately after this.
-pub fn write_raw_chunk_header<W: Write>(
-    w: &mut W,
-    num_blocks: u32,
-    block_size: u32,
-) -> Result<()> {
+pub fn write_raw_chunk_header<W: Write>(w: &mut W, num_blocks: u32, block_size: u32) -> Result<()> {
     let data_bytes = num_blocks as u64 * block_size as u64;
     let total_sz = CHUNK_HEADER_SIZE as u64 + data_bytes;
     write_chunk_header(w, CHUNK_TYPE_RAW, num_blocks, total_sz as u32)
@@ -81,11 +82,7 @@ pub fn write_raw_chunk_header<W: Write>(
 }
 
 /// Write a FILL chunk (4-byte fill value repeated for `num_blocks` blocks).
-pub fn write_fill_chunk<W: Write>(
-    w: &mut W,
-    num_blocks: u32,
-    fill_value: u32,
-) -> Result<()> {
+pub fn write_fill_chunk<W: Write>(w: &mut W, num_blocks: u32, fill_value: u32) -> Result<()> {
     let total_sz = CHUNK_HEADER_SIZE as u32 + 4;
     write_chunk_header(w, CHUNK_TYPE_FILL, num_blocks, total_sz)?;
     w.write_all(&fill_value.to_le_bytes())?;

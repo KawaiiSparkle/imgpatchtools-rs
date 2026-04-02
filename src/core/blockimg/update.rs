@@ -32,7 +32,10 @@ pub fn block_image_update(
     resume_file: Option<&Path>,
 ) -> Result<()> {
     let tl_content = fs::read_to_string(transfer_list_path).with_context(|| {
-        format!("failed to read transfer list {}", transfer_list_path.display())
+        format!(
+            "failed to read transfer list {}",
+            transfer_list_path.display()
+        )
     })?;
     let tl = parse_transfer_list(&tl_content).context("failed to parse transfer list")?;
 
@@ -47,13 +50,11 @@ pub fn block_image_update(
         initialise_target_from_source(src, &mut target, &tl)?;
     }
 
-    let new_data = NewDataReader::open(new_data_path).with_context(|| {
-        format!("failed to open new-data {}", new_data_path.display())
-    })?;
+    let new_data = NewDataReader::open(new_data_path)
+        .with_context(|| format!("failed to open new-data {}", new_data_path.display()))?;
 
-    let patch_data = PatchDataReader::open(patch_data_path).with_context(|| {
-        format!("failed to open patch-data {}", patch_data_path.display())
-    })?;
+    let patch_data = PatchDataReader::open(patch_data_path)
+        .with_context(|| format!("failed to open patch-data {}", patch_data_path.display()))?;
 
     let stash = StashManager::new(
         stash_dir,
@@ -93,16 +94,11 @@ pub fn block_image_update(
     Ok(())
 }
 
-pub fn range_sha1(
-    file_path: &Path,
-    ranges_str: &str,
-    block_size: usize,
-) -> Result<String> {
-    let bf = BlockFile::open(file_path, block_size).with_context(|| {
-        format!("failed to open {}", file_path.display())
-    })?;
-    let ranges = crate::util::rangeset::RangeSet::parse(ranges_str)
-        .context("failed to parse ranges")?;
+pub fn range_sha1(file_path: &Path, ranges_str: &str, block_size: usize) -> Result<String> {
+    let bf = BlockFile::open(file_path, block_size)
+        .with_context(|| format!("failed to open {}", file_path.display()))?;
+    let ranges =
+        crate::util::rangeset::RangeSet::parse(ranges_str).context("failed to parse ranges")?;
     let data = bf.read_ranges(&ranges).context("failed to read ranges")?;
     Ok(crate::util::hash::sha1_hex(&data))
 }
@@ -162,9 +158,8 @@ fn open_or_create_target(path: &Path, tl: &TransferList) -> Result<BlockFile> {
     let expected_len = tl.total_blocks() as u64 * BLOCK_SIZE as u64;
 
     if path.exists() {
-        let meta = fs::metadata(path).with_context(|| {
-            format!("failed to stat target {}", path.display())
-        })?;
+        let meta = fs::metadata(path)
+            .with_context(|| format!("failed to stat target {}", path.display()))?;
 
         // 只有当文件大小完美匹配时，才直接 Read-Only/Write 打开
         if meta.len() == expected_len {
@@ -173,9 +168,8 @@ fn open_or_create_target(path: &Path, tl: &TransferList) -> Result<BlockFile> {
                 path.display(),
                 meta.len()
             );
-            return BlockFile::open(path, BLOCK_SIZE).with_context(|| {
-                format!("failed to open target r/w {}", path.display())
-            });
+            return BlockFile::open(path, BLOCK_SIZE)
+                .with_context(|| format!("failed to open target r/w {}", path.display()));
         } else {
             log::info!(
                 "target exists but size mismatch ({} vs expected {}), resizing...",
@@ -195,24 +189,21 @@ fn open_or_create_target(path: &Path, tl: &TransferList) -> Result<BlockFile> {
 
     if let Some(parent) = path.parent() {
         if !parent.exists() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create parent dir {}", parent.display())
-            })?;
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create parent dir {}", parent.display()))?;
         }
     }
 
-    BlockFile::create(path, tl.total_blocks(), BLOCK_SIZE).with_context(|| {
-        format!("failed to create or resize target {}", path.display())
-    })
+    BlockFile::create(path, tl.total_blocks(), BLOCK_SIZE)
+        .with_context(|| format!("failed to create or resize target {}", path.display()))
 }
 
 fn open_source(path: Option<&Path>) -> Result<Option<BlockFile>> {
     match path {
         Some(p) => {
             log::info!("opening source: {}", p.display());
-            let bf = BlockFile::open(p, BLOCK_SIZE).with_context(|| {
-                format!("failed to open source {}", p.display())
-            })?;
+            let bf = BlockFile::open(p, BLOCK_SIZE)
+                .with_context(|| format!("failed to open source {}", p.display()))?;
             Ok(Some(bf))
         }
         None => {

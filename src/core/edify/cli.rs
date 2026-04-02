@@ -71,7 +71,10 @@ pub(crate) fn auto_patch_recovery(workdir: &str) {
     let script_path = Path::new(workdir).join("install-recovery.sh");
     let patch_path = Path::new(workdir).join("recovery-from-boot.p");
 
-    log::info!("Checking for recovery patch files in {}...", target_img.display());
+    log::info!(
+        "Checking for recovery patch files in {}...",
+        target_img.display()
+    );
 
     // Extract files via 7z silently
     let out = std::process::Command::new("7z")
@@ -129,7 +132,9 @@ pub(crate) fn auto_patch_recovery(workdir: &str) {
                 }
             }
         }
-        if found { break; }
+        if found {
+            break;
+        }
     }
 
     if found {
@@ -147,7 +152,7 @@ pub(crate) fn auto_patch_recovery(workdir: &str) {
             &recovery_path,
             &target_sha1,
             target_size,
-            &patch_path
+            &patch_path,
         ) {
             Ok(_) => {
                 println!("Done!");
@@ -194,11 +199,13 @@ fn prompt_build_super(dp: &DynamicPartitionState, workdir: &str) -> Result<()> {
     let version = if ver_str.is_empty() {
         LpVersion::V1_2
     } else {
-        LpVersion::from_android_version(ver_str)
-            .unwrap_or_else(|| {
-                println!("Unknown version '{}', defaulting to v10.2 (Android 12+)", ver_str);
-                LpVersion::V1_2
-            })
+        LpVersion::from_android_version(ver_str).unwrap_or_else(|| {
+            println!(
+                "Unknown version '{}', defaulting to v10.2 (Android 12+)",
+                ver_str
+            );
+            LpVersion::V1_2
+        })
     };
 
     // Ask metadata slots.
@@ -248,7 +255,15 @@ fn prompt_build_super(dp: &DynamicPartitionState, workdir: &str) -> Result<()> {
     };
 
     // Build.
-    do_build_super(dp, workdir, version, metadata_slots, user_device_size, format, super_name)?;
+    do_build_super(
+        dp,
+        workdir,
+        version,
+        metadata_slots,
+        user_device_size,
+        format,
+        super_name,
+    )?;
     Ok(())
 }
 
@@ -266,7 +281,11 @@ fn do_build_super(
         SuperImageFormat::Raw => "raw",
     };
     println!();
-    println!("Building super.img (LP {}, {})...", version.label(), fmt_label);
+    println!(
+        "Building super.img (LP {}, {})...",
+        version.label(),
+        fmt_label
+    );
 
     let metadata_max_size: u32 = 65536;
 

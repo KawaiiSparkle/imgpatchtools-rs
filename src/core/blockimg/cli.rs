@@ -80,25 +80,23 @@ pub fn run(args: &BlockimgArgs, verbose: bool) -> Result<()> {
             source,
             stash_dir,
             resume_file,
-        } => {
-            update::block_image_update(
-                target,
-                transfer_list,
-                new_data,
-                patch_data,
-                source.as_deref(),
-                stash_dir,
-                verbose,
-                resume_file.as_deref(),
-            )
-        }
+        } => update::block_image_update(
+            target,
+            transfer_list,
+            new_data,
+            patch_data,
+            source.as_deref(),
+            stash_dir,
+            verbose,
+            resume_file.as_deref(),
+        ),
 
         BlockimgCommand::Verify {
             target,
             transfer_list,
         } => {
-            let ok = verify::block_image_verify(target, transfer_list)
-                .context("verification failed")?;
+            let ok =
+                verify::block_image_verify(target, transfer_list).context("verification failed")?;
             if ok {
                 println!("VERIFY: PASS");
                 Ok(())
@@ -112,8 +110,8 @@ pub fn run(args: &BlockimgArgs, verbose: bool) -> Result<()> {
             ranges,
             block_size,
         } => {
-            let sha1 = update::range_sha1(file, ranges, *block_size)
-                .context("range_sha1 failed")?;
+            let sha1 =
+                update::range_sha1(file, ranges, *block_size).context("range_sha1 failed")?;
             println!("{sha1}");
             Ok(())
         }

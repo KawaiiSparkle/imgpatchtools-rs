@@ -17,10 +17,21 @@ pub enum BinaryOperator {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     StringLiteral(String),
-    FunctionCall { name: String, args: Vec<Expr> },
+    FunctionCall {
+        name: String,
+        args: Vec<Expr>,
+    },
     Sequence(Vec<Expr>),
-    If { condition: Box<Expr>, then: Box<Expr>, else_: Option<Box<Expr>> },
-    BinaryOp { op: BinaryOperator, lhs: Box<Expr>, rhs: Box<Expr> },
+    If {
+        condition: Box<Expr>,
+        then: Box<Expr>,
+        else_: Option<Box<Expr>>,
+    },
+    BinaryOp {
+        op: BinaryOperator,
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -52,7 +63,10 @@ struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     fn new(input: &'a str) -> Self {
-        Self { input: input.as_bytes(), pos: 0 }
+        Self {
+            input: input.as_bytes(),
+            pos: 0,
+        }
     }
 
     fn skip_whitespace_and_comments(&mut self) {
@@ -80,21 +94,39 @@ impl<'a> Lexer<'a> {
         };
 
         match ch {
-            b'(' => { self.pos += 1; Ok(Token::LParen) }
-            b')' => { self.pos += 1; Ok(Token::RParen) }
-            b',' => { self.pos += 1; Ok(Token::Comma) }
-            b';' => { self.pos += 1; Ok(Token::Semi) }
+            b'(' => {
+                self.pos += 1;
+                Ok(Token::LParen)
+            }
+            b')' => {
+                self.pos += 1;
+                Ok(Token::RParen)
+            }
+            b',' => {
+                self.pos += 1;
+                Ok(Token::Comma)
+            }
+            b';' => {
+                self.pos += 1;
+                Ok(Token::Semi)
+            }
             b'"' => self.read_quoted_string(),
             b'|' if self.input.get(self.pos + 1) == Some(&b'|') => {
-                self.pos += 2; Ok(Token::OrOr)
+                self.pos += 2;
+                Ok(Token::OrOr)
             }
             b'&' if self.input.get(self.pos + 1) == Some(&b'&') => {
-                self.pos += 2; Ok(Token::AndAnd)
+                self.pos += 2;
+                Ok(Token::AndAnd)
             }
             b'=' if self.input.get(self.pos + 1) == Some(&b'=') => {
-                self.pos += 2; Ok(Token::EqEq)
+                self.pos += 2;
+                Ok(Token::EqEq)
             }
-            b'+' => { self.pos += 1; Ok(Token::Plus) }
+            b'+' => {
+                self.pos += 1;
+                Ok(Token::Plus)
+            }
             _ => self.read_bare_word(),
         }
     }
@@ -104,7 +136,10 @@ impl<'a> Lexer<'a> {
         let mut s = String::new();
         while self.pos < self.input.len() {
             match self.input[self.pos] {
-                b'"' => { self.pos += 1; return Ok(Token::Str(s)); }
+                b'"' => {
+                    self.pos += 1;
+                    return Ok(Token::Str(s));
+                }
                 b'\\' => {
                     self.pos += 1;
                     if self.pos < self.input.len() {
@@ -112,7 +147,10 @@ impl<'a> Lexer<'a> {
                         self.pos += 1;
                     }
                 }
-                c => { s.push(c as char); self.pos += 1; }
+                c => {
+                    s.push(c as char);
+                    self.pos += 1;
+                }
             }
         }
         bail!("unterminated string")
@@ -192,14 +230,20 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_expr(&mut self) -> Result<Expr> { self.parse_or() }
+    fn parse_expr(&mut self) -> Result<Expr> {
+        self.parse_or()
+    }
 
     fn parse_or(&mut self) -> Result<Expr> {
         let mut lhs = self.parse_and()?;
         while self.current == Token::OrOr {
             self.bump()?;
             let rhs = self.parse_and()?;
-            lhs = Expr::BinaryOp { op: BinaryOperator::Or, lhs: Box::new(lhs), rhs: Box::new(rhs) };
+            lhs = Expr::BinaryOp {
+                op: BinaryOperator::Or,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
         }
         Ok(lhs)
     }
@@ -209,7 +253,11 @@ impl<'a> Parser<'a> {
         while self.current == Token::AndAnd {
             self.bump()?;
             let rhs = self.parse_equality()?;
-            lhs = Expr::BinaryOp { op: BinaryOperator::And, lhs: Box::new(lhs), rhs: Box::new(rhs) };
+            lhs = Expr::BinaryOp {
+                op: BinaryOperator::And,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
         }
         Ok(lhs)
     }
@@ -219,7 +267,11 @@ impl<'a> Parser<'a> {
         while self.current == Token::EqEq {
             self.bump()?;
             let rhs = self.parse_add()?;
-            lhs = Expr::BinaryOp { op: BinaryOperator::Eq, lhs: Box::new(lhs), rhs: Box::new(rhs) };
+            lhs = Expr::BinaryOp {
+                op: BinaryOperator::Eq,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
         }
         Ok(lhs)
     }
@@ -229,7 +281,11 @@ impl<'a> Parser<'a> {
         while self.current == Token::Plus {
             self.bump()?;
             let rhs = self.parse_primary()?;
-            lhs = Expr::BinaryOp { op: BinaryOperator::Add, lhs: Box::new(lhs), rhs: Box::new(rhs) };
+            lhs = Expr::BinaryOp {
+                op: BinaryOperator::Add,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
         }
         Ok(lhs)
     }
@@ -285,7 +341,11 @@ impl<'a> Parser<'a> {
         };
 
         self.expect(Token::Endif)?;
-        Ok(Expr::If { condition, then, else_ })
+        Ok(Expr::If {
+            condition,
+            then,
+            else_,
+        })
     }
 }
 

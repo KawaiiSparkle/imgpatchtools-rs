@@ -5,11 +5,11 @@
 //! no longer consumes 9.3 GB of address space; memory usage is bounded by
 //! the caller's buffer sizes (typically a few MiB at most).
 
+use crate::util::rangeset::RangeSet;
 use anyhow::{ensure, Context, Result};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use crate::util::rangeset::RangeSet;
 
 /// Reusable zero-fill chunk size (1 MiB).
 const ZERO_BUF_SIZE: usize = 1024 * 1024;
@@ -47,7 +47,11 @@ impl BlockFile {
             .with_context(|| format!("failed to open block file: {}", path.display()))?;
 
         let file_len = file.metadata()?.len();
-        Ok(Self { file, block_size, file_len })
+        Ok(Self {
+            file,
+            block_size,
+            file_len,
+        })
     }
 
     /// Create (or open) a file with a specific block count.
@@ -63,7 +67,11 @@ impl BlockFile {
         let file_len = num_blocks * block_size as u64;
         file.set_len(file_len)?;
 
-        Ok(Self { file, block_size, file_len })
+        Ok(Self {
+            file,
+            block_size,
+            file_len,
+        })
     }
 
     /// Extend the file if it is smaller than `required_len`.

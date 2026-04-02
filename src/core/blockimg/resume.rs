@@ -46,9 +46,8 @@ pub fn read_resume_index(path: &Path) -> Result<Option<usize>> {
         return Ok(None);
     }
 
-    let content = fs::read_to_string(path).with_context(|| {
-        format!("resume: failed to read {}", path.display())
-    })?;
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("resume: failed to read {}", path.display()))?;
     let trimmed = content.trim();
 
     if trimmed.is_empty() {
@@ -59,10 +58,7 @@ pub fn read_resume_index(path: &Path) -> Result<Option<usize>> {
     let mut lines = trimmed.lines();
 
     // Line 1: format version.
-    let version_str = lines
-        .next()
-        .context("resume: missing version line")?
-        .trim();
+    let version_str = lines.next().context("resume: missing version line")?.trim();
     let version: u32 = version_str
         .parse()
         .with_context(|| format!("resume: bad version: {version_str:?}"))?;
@@ -111,27 +107,23 @@ pub fn write_resume_index(path: &Path, index: usize) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
 
     if !parent.exists() {
-        fs::create_dir_all(parent).with_context(|| {
-            format!("resume: failed to create directory {}", parent.display())
-        })?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("resume: failed to create directory {}", parent.display()))?;
     }
 
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)
-        .context("resume: failed to create temp file")?;
+    let mut tmp =
+        tempfile::NamedTempFile::new_in(parent).context("resume: failed to create temp file")?;
 
-    writeln!(tmp, "{}", RESUME_FILE_VERSION)
-        .context("resume: failed to write version")?;
-    writeln!(tmp, "{}", index)
-        .context("resume: failed to write index")?;
+    writeln!(tmp, "{}", RESUME_FILE_VERSION).context("resume: failed to write version")?;
+    writeln!(tmp, "{}", index).context("resume: failed to write index")?;
 
     tmp.flush().context("resume: failed to flush")?;
     tmp.as_file()
         .sync_all()
         .context("resume: failed to fsync")?;
 
-    tmp.persist(path).with_context(|| {
-        format!("resume: failed to persist to {}", path.display())
-    })?;
+    tmp.persist(path)
+        .with_context(|| format!("resume: failed to persist to {}", path.display()))?;
 
     log::debug!("resume: wrote checkpoint {} → {}", index, path.display());
     Ok(())
@@ -154,9 +146,7 @@ pub fn clear_resume_file(path: &Path) -> Result<()> {
             log::debug!("resume: {} already absent", path.display());
             Ok(())
         }
-        Err(e) => Err(e).with_context(|| {
-            format!("resume: failed to delete {}", path.display())
-        }),
+        Err(e) => Err(e).with_context(|| format!("resume: failed to delete {}", path.display())),
     }
 }
 

@@ -239,12 +239,8 @@ impl StashManager {
 
         // Slow path: read from disk.
         let path = self.stash_path(id);
-        let data = fs::read(&path).with_context(|| {
-            format!(
-                "stash load: failed to read {}",
-                path.display()
-            )
-        })?;
+        let data = fs::read(&path)
+            .with_context(|| format!("stash load: failed to read {}", path.display()))?;
 
         // Verify integrity.
         verify_stash_sha1(id, &data)
@@ -300,9 +296,8 @@ impl StashManager {
                 log::debug!("stash free: {} (file already absent)", id);
             }
             Err(e) => {
-                return Err(e).with_context(|| {
-                    format!("stash free: failed to delete {}", path.display())
-                });
+                return Err(e)
+                    .with_context(|| format!("stash free: failed to delete {}", path.display()));
             }
         }
 
@@ -386,24 +381,20 @@ fn verify_stash_sha1(id: &str, data: &[u8]) -> Result<()> {
 fn write_stash_file(path: &Path, data: &[u8]) -> Result<()> {
     use std::io::Write;
 
-    let parent = path
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
 
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)
-        .context("stash: failed to create temp file")?;
+    let mut tmp =
+        tempfile::NamedTempFile::new_in(parent).context("stash: failed to create temp file")?;
 
     tmp.write_all(data)
         .context("stash: failed to write temp file")?;
-    tmp.flush()
-        .context("stash: failed to flush temp file")?;
+    tmp.flush().context("stash: failed to flush temp file")?;
     tmp.as_file()
         .sync_all()
         .context("stash: failed to sync temp file")?;
 
-    tmp.persist(path).with_context(|| {
-        format!("stash: failed to rename temp file to {}", path.display())
-    })?;
+    tmp.persist(path)
+        .with_context(|| format!("stash: failed to rename temp file to {}", path.display()))?;
 
     Ok(())
 }
@@ -803,10 +794,7 @@ mod tests {
         // Drop the manager and re-read the file directly.
         drop(mgr);
 
-        let on_disk = fs::read(
-            _dir.path().join("stash").join(&id),
-        )
-        .unwrap();
+        let on_disk = fs::read(_dir.path().join("stash").join(&id)).unwrap();
         assert_eq!(on_disk, data);
     }
 

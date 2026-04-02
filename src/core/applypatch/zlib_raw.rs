@@ -61,7 +61,7 @@ pub fn deflate_raw_exact(
 
     // Clamp other params to zlib-valid ranges.
     let mem_level = mem_level.clamp(1, 9);
-    let strategy  = strategy.clamp(0, 4);
+    let strategy = strategy.clamp(0, 4);
 
     log::debug!(
         "deflate_raw_exact: level={level} window_bits(raw)={raw_window_bits} \
@@ -69,9 +69,7 @@ pub fn deflate_raw_exact(
         data.len()
     );
 
-    unsafe {
-        deflate_raw_unsafe(data, level, raw_window_bits, mem_level, strategy)
-    }
+    unsafe { deflate_raw_unsafe(data, level, raw_window_bits, mem_level, strategy) }
 }
 
 // ---------------------------------------------------------------------------
@@ -113,9 +111,9 @@ unsafe fn deflate_raw_unsafe(
     let bound = zlib::deflateBound(strm, data.len() as zlib::uLong) as usize;
     let mut output = vec![0u8; bound];
 
-    strm.next_in   = data.as_ptr() as *mut u8;
-    strm.avail_in  = data.len() as zlib::uInt;
-    strm.next_out  = output.as_mut_ptr();
+    strm.next_in = data.as_ptr() as *mut u8;
+    strm.avail_in = data.len() as zlib::uInt;
+    strm.next_out = output.as_mut_ptr();
     strm.avail_out = output.len() as zlib::uInt;
 
     let ret = zlib::deflate(strm, Z_FINISH);
@@ -150,7 +148,10 @@ mod tests {
 
         loop {
             let before = dec.total_out() as usize;
-            match dec.decompress(data, &mut out[before..], FlushDecompress::Finish).unwrap() {
+            match dec
+                .decompress(data, &mut out[before..], FlushDecompress::Finish)
+                .unwrap()
+            {
                 flate2::Status::StreamEnd => break,
                 _ => {
                     let cur = out.len();
@@ -180,7 +181,7 @@ mod tests {
         let data = b"negative window_bits variant";
         // -15 should behave identically to +15
         let c_neg = deflate_raw_exact(data, 6, -15, 8, 0).unwrap();
-        let c_pos = deflate_raw_exact(data,  6,  15, 8, 0).unwrap();
+        let c_pos = deflate_raw_exact(data, 6, 15, 8, 0).unwrap();
         assert_eq!(c_neg, c_pos, "±window_bits must produce identical output");
     }
 
@@ -241,7 +242,7 @@ mod tests {
     fn default_level_equals_6() {
         let data = b"default level test";
         let cm1 = deflate_raw_exact(data, -1, 15, 8, 0).unwrap();
-        let c6  = deflate_raw_exact(data,  6, 15, 8, 0).unwrap();
+        let c6 = deflate_raw_exact(data, 6, 15, 8, 0).unwrap();
         assert_eq!(cm1, c6);
     }
 

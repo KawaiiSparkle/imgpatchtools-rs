@@ -53,11 +53,7 @@ pub fn apply_bspatch(source: &[u8], patch: &[u8]) -> Result<Vec<u8>> {
 ///    a. Add `diff[dp..dp+add_len]` to `source[sp..sp+add_len]` → target
 ///    b. Copy `extra[ep..ep+copy_len]` → target
 ///    c. Adjust source pointer by `seek_adj`
-pub fn apply_bspatch_at(
-    source: &[u8],
-    patch: &[u8],
-    patch_offset: usize,
-) -> Result<Vec<u8>> {
+pub fn apply_bspatch_at(source: &[u8], patch: &[u8], patch_offset: usize) -> Result<Vec<u8>> {
     let header = parse_header(patch, patch_offset)?;
     let (ctrl, diff, extra) = decompress_sections(patch, patch_offset, &header)?;
     apply_patch_loop(source, &ctrl, &diff, &extra, header.new_size)
@@ -141,12 +137,11 @@ fn decompress_sections(
     let diff_compressed = &payload[header.ctrl_len..header.ctrl_len + header.diff_len];
     let extra_compressed = &payload[header.ctrl_len + header.diff_len..];
 
-    let ctrl = decompress_bz2(ctrl_compressed)
-        .context("failed to decompress bsdiff control block")?;
-    let diff = decompress_bz2(diff_compressed)
-        .context("failed to decompress bsdiff diff block")?;
-    let extra = decompress_bz2(extra_compressed)
-        .context("failed to decompress bsdiff extra block")?;
+    let ctrl =
+        decompress_bz2(ctrl_compressed).context("failed to decompress bsdiff control block")?;
+    let diff = decompress_bz2(diff_compressed).context("failed to decompress bsdiff diff block")?;
+    let extra =
+        decompress_bz2(extra_compressed).context("failed to decompress bsdiff extra block")?;
 
     Ok((ctrl, diff, extra))
 }
@@ -228,10 +223,7 @@ fn apply_patch_loop(
         old_pos += add_len as i64;
 
         // ---- Copy extra block ----
-        ensure!(
-            new_pos + copy_len <= new_size,
-            "copy_len overflows output"
-        );
+        ensure!(new_pos + copy_len <= new_size, "copy_len overflows output");
         ensure!(
             extra_pos + copy_len <= extra.len(),
             "copy_len overflows extra data"

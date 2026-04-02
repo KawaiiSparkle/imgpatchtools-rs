@@ -1,9 +1,9 @@
-use anyhow::{ensure, Result};
-use std::io::Read;
-use std::fs::File;
-use crate::util::rangeset::RangeSet;
 use crate::util::io::BlockFile;
 use crate::util::progress::ProgressReporter;
+use crate::util::rangeset::RangeSet;
+use anyhow::{ensure, Result};
+use std::fs::File;
+use std::io::Read;
 
 pub struct NewDataReader {
     reader: Box<dyn Read>,
@@ -27,13 +27,22 @@ impl NewDataReader {
                 let xz_path = std::path::PathBuf::from(format!("{}.xz", path.display()));
 
                 if let Ok(f) = File::open(&br_path) {
-                    log::info!("auto-fallback to compressed new data: {}", br_path.display());
+                    log::info!(
+                        "auto-fallback to compressed new data: {}",
+                        br_path.display()
+                    );
                     (f, "br".to_string())
                 } else if let Ok(f) = File::open(&lzma_path) {
-                    log::info!("auto-fallback to compressed new data: {}", lzma_path.display());
+                    log::info!(
+                        "auto-fallback to compressed new data: {}",
+                        lzma_path.display()
+                    );
                     (f, "lzma".to_string())
                 } else if let Ok(f) = File::open(&xz_path) {
-                    log::info!("auto-fallback to compressed new data: {}", xz_path.display());
+                    log::info!(
+                        "auto-fallback to compressed new data: {}",
+                        xz_path.display()
+                    );
                     (f, "xz".to_string())
                 } else {
                     return Err(e.into());
@@ -102,7 +111,10 @@ impl PatchDataReader {
         let mmap = if meta.len() > 0 {
             Some(unsafe { memmap2::Mmap::map(&file)? })
         } else {
-            log::info!("patch file {} is empty (0 bytes), skipping mmap", path.display());
+            log::info!(
+                "patch file {} is empty (0 bytes), skipping mmap",
+                path.display()
+            );
             None
         };
 
@@ -185,7 +197,10 @@ impl CommandContext {
                     let buf_end = buf_start + len;
 
                     ensure!(buf_end <= buffer.len(), "buffer_map out of bounds");
-                    ensure!(data_off + len <= data.len(), "buffer_map needs more data than src_ranges provides");
+                    ensure!(
+                        data_off + len <= data.len(),
+                        "buffer_map needs more data than src_ranges provides"
+                    );
 
                     buffer[buf_start..buf_end].copy_from_slice(&data[data_off..data_off + len]);
                     data_off += len;
@@ -197,7 +212,10 @@ impl CommandContext {
                     data.len()
                 );
             } else {
-                ensure!(data.len() <= buffer.len(), "direct source data exceeds buffer");
+                ensure!(
+                    data.len() <= buffer.len(),
+                    "direct source data exceeds buffer"
+                );
                 buffer[..data.len()].copy_from_slice(&data);
             }
         }
@@ -212,7 +230,10 @@ impl CommandContext {
                 let buf_end = buf_start + len;
 
                 ensure!(buf_end <= buffer.len(), "stash ref map exceeds buffer");
-                ensure!(stash_off + len <= stash_data.len(), "stash data too small for map");
+                ensure!(
+                    stash_off + len <= stash_data.len(),
+                    "stash data too small for map"
+                );
 
                 buffer[buf_start..buf_end].copy_from_slice(&stash_data[stash_off..stash_off + len]);
                 stash_off += len;

@@ -26,15 +26,10 @@ const BLOCK_SIZE: usize = 4096;
 /// - 否则读 src_ranges → 与 src_hash 对比
 ///
 /// 返回 `Ok(true)` 表示所有可验证命令通过，`Ok(false)` 表示有命令失败。
-pub fn block_image_verify(
-    target_path: &Path,
-    transfer_list_path: &Path,
-) -> Result<bool> {
-    let tl_content = std::fs::read_to_string(transfer_list_path).with_context(|| {
-        format!("verify: failed to read {}", transfer_list_path.display())
-    })?;
-    let tl = parse_transfer_list(&tl_content)
-        .context("verify: failed to parse transfer list")?;
+pub fn block_image_verify(target_path: &Path, transfer_list_path: &Path) -> Result<bool> {
+    let tl_content = std::fs::read_to_string(transfer_list_path)
+        .with_context(|| format!("verify: failed to read {}", transfer_list_path.display()))?;
+    let tl = parse_transfer_list(&tl_content).context("verify: failed to parse transfer list")?;
 
     if tl.version() < 3 {
         log::info!(
@@ -44,9 +39,8 @@ pub fn block_image_verify(
         return Ok(true);
     }
 
-    let image = BlockFile::open(target_path, BLOCK_SIZE).with_context(|| {
-        format!("verify: failed to open {}", target_path.display())
-    })?;
+    let image = BlockFile::open(target_path, BLOCK_SIZE)
+        .with_context(|| format!("verify: failed to open {}", target_path.display()))?;
 
     let mut pass_count: u64 = 0;
     let mut fail_count: u64 = 0;
@@ -128,9 +122,9 @@ pub fn block_image_verify(
         }
 
         // 7. 执行验证
-        let data = image.read_ranges(ranges).with_context(|| {
-            format!("verify cmd[{idx}]: failed to read src_ranges")
-        })?;
+        let data = image
+            .read_ranges(ranges)
+            .with_context(|| format!("verify cmd[{idx}]: failed to read src_ranges"))?;
         let actual = hash::sha1_hex(&data);
 
         if actual.eq_ignore_ascii_case(expected_hash) {
@@ -154,7 +148,9 @@ pub fn block_image_verify(
 
     log::info!(
         "verify complete: {} passed, {} failed, {} skipped (v{})",
-        pass_count, fail_count, skip_count,
+        pass_count,
+        fail_count,
+        skip_count,
         tl.version()
     );
 
@@ -169,7 +165,9 @@ pub fn range_sha1(file_path: &Path, ranges: &RangeSet, block_size: usize) -> Res
     ensure!(block_size > 0, "block_size must be positive");
     let bf = BlockFile::open(file_path, block_size)
         .with_context(|| format!("range_sha1: failed to open {}", file_path.display()))?;
-    let data = bf.read_ranges(ranges).context("range_sha1: failed to read")?;
+    let data = bf
+        .read_ranges(ranges)
+        .context("range_sha1: failed to read")?;
     Ok(hash::sha1_hex(&data))
 }
 
@@ -186,9 +184,14 @@ pub fn check_first_block(file_path: &Path, block_size: usize) -> Result<bool> {
     ensure!(block_size > 0, "block_size must be positive");
     let bf = BlockFile::open(file_path, block_size)
         .with_context(|| format!("check_first_block: failed to open {}", file_path.display()))?;
-    ensure!(bf.total_blocks() > 0, "check_first_block: no complete blocks");
+    ensure!(
+        bf.total_blocks() > 0,
+        "check_first_block: no complete blocks"
+    );
     let first = RangeSet::from_pairs(&[(0, 1)])?;
-    let data = bf.read_ranges(&first).context("check_first_block: read failed")?;
+    let data = bf
+        .read_ranges(&first)
+        .context("check_first_block: read failed")?;
     Ok(data.iter().any(|&b| b != 0))
 }
 
@@ -250,9 +253,7 @@ mod tests {
         let h1 = hash::sha1_hex(&data);
         // move2 的 src_hash 是 0xFF 的哈希（肯定不匹配），但应该被跳过
         let h2 = "0000000000000000000000000000000000000000";
-        let tl = format!(
-            "3\n8\n0\n0\nmove {h1} 2,0,4 4 2,4,8\nmove {h2} 2,4,8 4 2,0,4\n"
-        );
+        let tl = format!("3\n8\n0\n0\nmove {h1} 2,0,4 4 2,4,8\nmove {h2} 2,4,8 4 2,0,4\n");
         let tl_path = write_file(&dir, "tl.txt", tl.as_bytes());
         let mut img = data.clone();
         img.extend(vec![0xBBu8; 4 * BS]);
