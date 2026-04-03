@@ -841,7 +841,7 @@ fn fn_write_raw_image(ctx: &mut FunctionContext, args: &[Value]) -> Result<Value
 // SHA1 / verification
 // ---------------------------------------------------------------------------
 
-fn fn_sha1_check(ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
+fn fn_sha1_check(_ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
     if args.is_empty() {
         bail!("sha1_check: need at least 1 arg");
     }

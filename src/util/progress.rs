@@ -125,18 +125,6 @@ impl SilentProgress {
             position: 0,
         }
     }
-
-    /// Current position (for testing / introspection).
-    #[cfg(test)]
-    fn position(&self) -> u64 {
-        self.position
-    }
-
-    /// Current total (for testing / introspection).
-    #[cfg(test)]
-    fn total(&self) -> u64 {
-        self.total
-    }
 }
 
 impl Default for SilentProgress {
