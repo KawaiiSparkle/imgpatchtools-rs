@@ -47,7 +47,6 @@ pub fn builtin_registry() -> CommandRegistry {
     r
 }
 
-/// Execute one command via registry.
 pub fn execute_command(
     registry: &CommandRegistry,
     ctx: &mut CommandContext,
@@ -60,11 +59,6 @@ pub fn execute_command(
     f(ctx, cmd)
 }
 
-/// Execute all commands in the transfer list.
-///
-/// `resume_index`:
-/// - None: execute from command 0
-/// - Some(i): skip commands [0..=i] (i is last completed index in AOSP logic)
 pub fn execute_transfer_list(
     ctx: &mut CommandContext,
     list: &TransferList,
@@ -82,8 +76,6 @@ pub fn execute_transfer_list(
         );
     }
 
-    // Compute precise total for progress: sum of all target_ranges blocks
-    // across commands that will actually be executed.
     let progress_total: u64 = list
         .commands
         .iter()
@@ -96,6 +88,9 @@ pub fn execute_transfer_list(
         ctx.progress
             .set_stage(&format!("[{}/{}] {}", i + 1, total, cmd.cmd_type.as_str()));
 
+        // Reset the intra-command progress tracker
+        ctx.blocks_advanced_this_cmd = 0;
+
         execute_command(registry, ctx, cmd).with_context(|| {
             format!(
                 "command {} (index {}) failed: \"{}\"",
@@ -105,11 +100,16 @@ pub fn execute_transfer_list(
             )
         })?;
 
+        // Safely complement any progress that wasn't updated during the command
         let processed = cmd
             .target_ranges
             .as_ref()
             .map_or(0, |r: &RangeSet| r.blocks());
-        ctx.progress.advance(processed);
+
+        let remaining = processed.saturating_sub(ctx.blocks_advanced_this_cmd);
+        if remaining > 0 {
+            ctx.progress.advance(remaining);
+        }
     }
 
     ctx.progress.finish();

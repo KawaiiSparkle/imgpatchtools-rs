@@ -100,16 +100,11 @@ impl BlockFile {
     }
 
     /// Read a set of non-contiguous block ranges into a single contiguous buffer.
-    ///
-    /// Uses `&self` — positioned reads via `&File` (which implements `Read +
-    /// Seek`) allow shared access without `&mut`.
     pub fn read_ranges(&self, ranges: &RangeSet) -> Result<Vec<u8>> {
         let total_blocks = ranges.blocks();
         let mut buffer = vec![0u8; (total_blocks as usize) * self.block_size];
         let mut buffer_offset = 0usize;
 
-        // `&File` implements Read + Seek, enabling positioned I/O without
-        // requiring &mut self.  This is safe in single-threaded code.
         let mut f = &self.file;
 
         for (start, end) in ranges.iter() {
@@ -133,6 +128,29 @@ impl BlockFile {
             buffer_offset += read_len;
         }
         Ok(buffer)
+    }
+
+    /// Read ranges block-by-block and pass them to a callback (avoids allocating memory).
+    pub fn chunked_read_ranges<F>(&self, ranges: &RangeSet, mut cb: F) -> Result<()>
+    where
+        F: FnMut(&[u8]) -> Result<()>,
+    {
+        let mut buf = vec![0u8; 1024 * 1024]; // 1 MiB stream buffer
+        let mut f = &self.file;
+        for (start, end) in ranges.iter() {
+            let file_offset = (start as u64) * (self.block_size as u64);
+            let mut total_len = ((end - start) as usize) * self.block_size;
+
+            f.seek(SeekFrom::Start(file_offset))?;
+
+            while total_len > 0 {
+                let chunk = total_len.min(buf.len());
+                f.read_exact(&mut buf[..chunk])?;
+                cb(&buf[..chunk])?;
+                total_len -= chunk;
+            }
+        }
+        Ok(())
     }
 
     /// Write a contiguous buffer of data to a set of non-contiguous block ranges.
@@ -171,14 +189,94 @@ impl BlockFile {
         Ok(())
     }
 
-    /// Fill a set of block ranges with zeroes.
-    ///
-    /// If any range extends beyond the current file size, the file is
-    /// automatically grown to accommodate it (matching AOSP block-device
-    /// semantics).  Uses a fixed 1 MiB zero buffer — memory usage is
-    /// constant regardless of range size.
+    /// Sequentially stream data from a reader into non-contiguous target block ranges.
+    pub fn write_ranges_from_reader<F>(
+        &mut self,
+        ranges: &RangeSet,
+        reader: &mut dyn Read,
+        mut progress_cb: F,
+    ) -> Result<()>
+    where
+        F: FnMut(u64), // blocks processed
+    {
+        let mut max_needed: u64 = self.file_len;
+        for (_start, end) in ranges.iter() {
+            let range_end = (end as u64) * (self.block_size as u64);
+            if range_end > max_needed {
+                max_needed = range_end;
+            }
+        }
+        if max_needed > self.file_len {
+            self.ensure_size(max_needed)?;
+        }
+
+        let mut buf = vec![0u8; 1024 * 1024]; // 1 MiB chunk
+        for (start, end) in ranges.iter() {
+            let file_offset = (start as u64) * (self.block_size as u64);
+            let mut total_len = ((end - start) as usize) * self.block_size;
+
+            self.file.seek(SeekFrom::Start(file_offset))?;
+
+            while total_len > 0 {
+                let chunk = total_len.min(buf.len());
+                reader.read_exact(&mut buf[..chunk])?;
+                self.file.write_all(&buf[..chunk])?;
+                total_len -= chunk;
+
+                if chunk % self.block_size == 0 {
+                    progress_cb((chunk / self.block_size) as u64);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Directly copy ranges from a source BlockFile (bypassing large memory allocations).
+    pub fn copy_ranges(&mut self, ranges: &RangeSet, src: &BlockFile) -> Result<()> {
+        let mut max_needed: u64 = self.file_len;
+        for (_start, end) in ranges.iter() {
+            let range_end = (end as u64) * (self.block_size as u64);
+            if range_end > max_needed {
+                max_needed = range_end;
+            }
+        }
+        if max_needed > self.file_len {
+            self.ensure_size(max_needed)?;
+        }
+
+        let mut buf = vec![0u8; 1024 * 1024];
+        let mut src_f = &src.file;
+
+        for (start, end) in ranges.iter() {
+            let file_offset = (start as u64) * (self.block_size as u64);
+            let mut total_len = ((end - start) as usize) * self.block_size;
+
+            self.file.seek(SeekFrom::Start(file_offset))?;
+            src_f.seek(SeekFrom::Start(file_offset))?;
+
+            while total_len > 0 {
+                let chunk = total_len.min(buf.len());
+                src_f.read_exact(&mut buf[..chunk])?;
+                self.file.write_all(&buf[..chunk])?;
+                total_len -= chunk;
+            }
+        }
+        Ok(())
+    }
+
     pub fn zero_ranges(&mut self, ranges: &RangeSet) -> Result<()> {
-        // Determine whether the file needs to grow.
+        self.zero_ranges_with_progress(ranges, |_| {})
+    }
+
+    /// Fill a set of block ranges with zeroes, providing live progress updates.
+    pub fn zero_ranges_with_progress<F>(
+        &mut self,
+        ranges: &RangeSet,
+        mut progress_cb: F,
+    ) -> Result<()>
+    where
+        F: FnMut(u64),
+    {
         let mut max_needed: u64 = self.file_len;
         for (_start, end) in ranges.iter() {
             let range_end = (end as u64) * (self.block_size as u64);
@@ -194,23 +292,17 @@ impl BlockFile {
 
         for (start, end) in ranges.iter() {
             let file_offset = (start as u64) * (self.block_size as u64);
-            let total_len = ((end - start) as usize) * self.block_size;
-
-            ensure!(
-                file_offset + total_len as u64 <= self.file_len,
-                "zero range [{}, {}) exceeds file bounds (len {})",
-                file_offset,
-                file_offset + total_len as u64,
-                self.file_len
-            );
+            let mut remaining = ((end - start) as usize) * self.block_size;
 
             self.file.seek(SeekFrom::Start(file_offset))?;
 
-            let mut remaining = total_len;
             while remaining > 0 {
                 let chunk = remaining.min(ZERO_BUF_SIZE);
                 self.file.write_all(&zeros[..chunk])?;
                 remaining -= chunk;
+                if chunk % self.block_size == 0 {
+                    progress_cb((chunk / self.block_size) as u64);
+                }
             }
         }
         Ok(())

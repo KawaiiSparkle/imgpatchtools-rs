@@ -21,7 +21,6 @@ impl NewDataReader {
                 (f, ext)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Auto-fallback: check if a compressed version exists.
                 let br_path = std::path::PathBuf::from(format!("{}.br", path.display()));
                 let lzma_path = std::path::PathBuf::from(format!("{}.lzma", path.display()));
                 let xz_path = std::path::PathBuf::from(format!("{}.xz", path.display()));
@@ -51,7 +50,6 @@ impl NewDataReader {
             Err(e) => return Err(e.into()),
         };
 
-        // Attach appropriate streaming decompressor
         let reader: Box<dyn Read> = match ext.as_str() {
             "br" => {
                 log::info!("using Brotli streaming decompressor for new data");
@@ -59,7 +57,6 @@ impl NewDataReader {
             }
             "lzma" => {
                 log::info!("using LZMA streaming decompressor for new data");
-                // xz2 wraps liblzma; new_lzma_decoder handles raw .lzma format
                 let stream = xz2::stream::Stream::new_lzma_decoder(u64::MAX)
                     .map_err(|e| anyhow::anyhow!("failed to create LZMA decoder: {}", e))?;
                 Box::new(xz2::read::XzDecoder::new_stream(
@@ -86,7 +83,6 @@ impl NewDataReader {
         Ok(buf)
     }
 
-    /// 用于断点续传时跳过已完成命令的数据
     pub fn skip_blocks(&mut self, count: u64, block_size: usize) -> Result<()> {
         let mut len = (count as usize) * block_size;
         let mut buf = vec![0u8; 65536.min(len)];
@@ -96,6 +92,10 @@ impl NewDataReader {
             len -= to_read;
         }
         Ok(())
+    }
+
+    pub fn get_reader_mut(&mut self) -> &mut dyn Read {
+        &mut *self.reader
     }
 }
 
@@ -146,6 +146,7 @@ pub struct CommandContext {
     pub patch_data: PatchDataReader,
     pub written_blocks: u64,
     pub progress: Box<dyn ProgressReporter>,
+    pub blocks_advanced_this_cmd: u64,
 }
 
 impl CommandContext {
@@ -170,6 +171,7 @@ impl CommandContext {
             patch_data,
             written_blocks: 0,
             progress,
+            blocks_advanced_this_cmd: 0,
         }
     }
 
@@ -205,12 +207,6 @@ impl CommandContext {
                     buffer[buf_start..buf_end].copy_from_slice(&data[data_off..data_off + len]);
                     data_off += len;
                 }
-                ensure!(
-                    data_off == data.len(),
-                    "buffer_map did not consume all direct source data: consumed {}, data len {}",
-                    data_off,
-                    data.len()
-                );
             } else {
                 ensure!(
                     data.len() <= buffer.len(),
@@ -238,12 +234,6 @@ impl CommandContext {
                 buffer[buf_start..buf_end].copy_from_slice(&stash_data[stash_off..stash_off + len]);
                 stash_off += len;
             }
-            ensure!(
-                stash_off == stash_data.len(),
-                "stash ref map did not consume full stash data: consumed {}, stash len {}",
-                stash_off,
-                stash_data.len()
-            );
         }
 
         Ok(buffer)

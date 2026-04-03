@@ -41,7 +41,6 @@ pub fn block_image_update(
 
     log_header_info(&tl);
 
-    // 自动创建或修正 target_path 的大小
     let mut target = open_or_create_target(target_path, &tl)?;
 
     let source = open_source(source_path)?;
@@ -99,8 +98,18 @@ pub fn range_sha1(file_path: &Path, ranges_str: &str, block_size: usize) -> Resu
         .with_context(|| format!("failed to open {}", file_path.display()))?;
     let ranges =
         crate::util::rangeset::RangeSet::parse(ranges_str).context("failed to parse ranges")?;
-    let data = bf.read_ranges(&ranges).context("failed to read ranges")?;
-    Ok(crate::util::hash::sha1_hex(&data))
+
+    use sha1::{Digest, Sha1};
+    let mut hasher = Sha1::new();
+    bf.chunked_read_ranges(&ranges, |chunk| {
+        hasher.update(chunk);
+        Ok(())
+    })
+    .context("failed to read ranges for sha1")?;
+
+    let res = hasher.finalize();
+    let hex_str = res.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+    Ok(hex_str)
 }
 
 // ---------------------------------------------------------------------------
@@ -140,12 +149,9 @@ fn initialise_target_from_source(
     );
 
     let ranges = RangeSet::from_range(0, copy_blocks);
-    let data = src
-        .read_ranges(&ranges)
-        .context("initialise_target_from_source: failed to read source")?;
     target
-        .write_ranges(&ranges, &data)
-        .context("initialise_target_from_source: failed to write target")?;
+        .copy_ranges(&ranges, src)
+        .context("initialise_target_from_source: failed to copy ranges")?;
     target
         .flush()
         .context("initialise_target_from_source: failed to flush target")?;
@@ -153,7 +159,6 @@ fn initialise_target_from_source(
     Ok(())
 }
 
-/// 核心修复：严格校验现有文件的大小，如果有偏差（如中断导致的残缺），强制补齐。
 fn open_or_create_target(path: &Path, tl: &TransferList) -> Result<BlockFile> {
     let expected_len = tl.total_blocks() as u64 * BLOCK_SIZE as u64;
 
@@ -161,7 +166,6 @@ fn open_or_create_target(path: &Path, tl: &TransferList) -> Result<BlockFile> {
         let meta = fs::metadata(path)
             .with_context(|| format!("failed to stat target {}", path.display()))?;
 
-        // 只有当文件大小完美匹配时，才直接 Read-Only/Write 打开
         if meta.len() == expected_len {
             log::info!(
                 "opening existing target: {} ({} bytes)",
@@ -176,7 +180,6 @@ fn open_or_create_target(path: &Path, tl: &TransferList) -> Result<BlockFile> {
                 meta.len(),
                 expected_len
             );
-            // 将顺延到下方的 BlockFile::create，它会自动安全扩展文件长度
         }
     } else {
         log::info!(
@@ -251,7 +254,3 @@ fn read_resume_index(path: Option<&Path>) -> Result<Option<usize>> {
 
     Ok(Some(resume_at))
 }
-
-// ===========================================================================
-// Tests (Omitted for brevity, original tests still apply)
-// ===========================================================================
