@@ -11,3 +11,16 @@
 [alias]
 build-release-static = "rustc --release --bin imgpatchtools-rs -- -C target-feature=+crt-static"
 b-release-static = "rustc --release --bin imgpatchtools-rs -- -C target-feature=+crt-static"
+
+[build]
+jobs = 8
+
+[profile.dev]
+opt-level = 3        # 开满优化
+debug = true        
+debug-assertions = false
+overflow-checks = false
+lto = "thin"         # 或 "fat"
+codegen-units = 1
+strip = "symbols"
+incremental = false  # 增量编译在这种配置下意义不大，还可能更慢

@@ -42,7 +42,7 @@ pub fn run(args: &EdifyArgs, verbose: bool) -> Result<()> {
     }
 
     let registry = builtin_registry();
-    let result = run_script_with_mode(&content, &registry, &args.workdir, args.verify)?;
+    let result = run_script_with_mode(&content, &registry, &args.workdir, args.verify, true)?;
 
     if verbose {
         log::info!("edify: result = {:?}", result.value.as_str());

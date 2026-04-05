@@ -948,14 +948,16 @@ pub fn run_script(
 ///
 /// In fast mode (verify=false), only apply_patch, block_image_update and abort are executed.
 /// In verify mode (verify=true), all commands including block_image_verify and assertions are executed.
+/// When offline=true, device verification (getprop, abort, assert) is skipped.
 pub fn run_script_with_mode(
     script: &str,
     registry: &FunctionRegistry,
     workdir: &str,
     verify: bool,
+    offline: bool,
 ) -> Result<ScriptResult> {
     let has_compressed_data = script.contains(".dat.br") || script.contains(".dat.lzma");
-    let effective_offline = has_compressed_data;
+    let effective_offline = offline || has_compressed_data;
 
     if effective_offline {
         log::info!("edify: offline mode enabled (getprop will return tolerant defaults)");

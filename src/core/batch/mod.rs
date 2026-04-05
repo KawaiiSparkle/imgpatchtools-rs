@@ -347,6 +347,7 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
             &registry,
             &ota_dir.to_string_lossy(),
             config.verify,
+            true, // Always offline mode: skip device verification
         )
         .with_context(|| format!("edify execution for OTA #{}", pkg.index))?;
         timer.end(); // End edify script timer

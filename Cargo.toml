@@ -6,6 +6,13 @@ authors = ["KawaiiSparkle"]
 description = "Rust reimplementation of Android imgpatchtools"
 license = "GPL-3.0"
 
+[profile.dev]
+# Fast debug build settings
+codegen-units = 16
+opt-level = 3
+debug = 1
+incremental = true
+
 [profile.release]
 opt-level = 3
 lto = true
@@ -34,6 +41,10 @@ tempfile    = "3"
 rayon       = "1"
 regex       = "1"
 libz-sys    = { version = "1", features = ["static"] }
+lru         = "0.16"
+
+[target.'cfg(unix)'.dependencies]
+libc        = "0.2"
 
 [dev-dependencies]
 assert_cmd         = "2"
