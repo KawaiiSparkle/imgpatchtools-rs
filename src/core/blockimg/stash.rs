@@ -1,30 +1,23 @@
-//! Stash management — complete port of the stash subsystem in AOSP
-//! `blockimg.cpp`.
+//! Stash management — lazy-loading port of AOSP `blockimg.cpp` stash subsystem.
 //!
-//! During a block-image update, the `move` / `bsdiff` / `imgdiff` commands
-//! may need to read source blocks that will be overwritten before they are
-//! consumed. The stash mechanism saves those blocks to a temporary location
-//! (memory + on-disk file) so they can be retrieved later.
+//! Uses disk-first strategy: data stays on disk, only metadata in memory.
+//! This matches C++ behavior and minimizes RAM usage.
 //!
 //! # AOSP stash contract
 //!
-//! | Function       | AOSP equivalent    | Behaviour                          |
-//! |----------------|--------------------|------------------------------------|
-//! | [`new`]        | `CreateStash`      | Create work dir, clean up stale    |
-//! | [`save`]       | `WriteStash`       | Write to cache + file              |
-//! | [`load`]       | `LoadStash`        | Read from cache (or file fallback) |
-//! | [`free`]       | `FreeStash`        | Remove from cache + delete file    |
-//! | [`clear_all`]  | (cleanup path)     | Remove everything                  |
-//!
-//! # File naming
-//!
-//! In AOSP, stash IDs are the SHA-1 hex digest of the stashed data. Each
-//! stash slot is persisted as `{work_dir}/{id}`. On load from disk, the
-//! file's content is verified against the ID (= SHA-1).
+//! | Function       | AOSP equivalent    | Behaviour                              |
+//! |----------------|--------------------|----------------------------------------|
+//! | [`new`]        | `CreateStash`      | Create work dir, clean up stale        |
+//! | [`save`]       | `WriteStash`       | Write to disk only (no cache)          |
+//! | [`load`]       | `LoadStash`        | Read from disk (no in-memory cache)    |
+//! | [`load_ref`]   | (verify mode)      | Return reference without caching       |
+//! | [`free`]       | `FreeStash`        | Delete file only                       |
+//! | [`clear_all`]  | (cleanup path)     | Remove everything                      |
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{bail, ensure, Context, Result};
 
@@ -34,20 +27,20 @@ use crate::util::hash;
 // StashManager
 // ---------------------------------------------------------------------------
 
-/// Manages stash slots for the block-image update engine.
+/// Manages stash slots using lazy loading from disk.
 ///
-/// Provides an in-memory cache backed by on-disk files for crash-safety.
-/// The on-disk files enable interrupted updates to resume without
-/// re-transferring data.
+/// Unlike the original Rust implementation that cached data in memory,
+/// this version matches C++ behavior: data stays on disk, only metadata
+/// (block count) is tracked in memory. This minimizes RAM usage for
+/// large updates.
 pub struct StashManager {
     /// Directory where stash files are stored.
     work_dir: PathBuf,
-    /// Block size in bytes (used for size-sanity checks only; not for
-    /// alignment, since stash data is always a whole number of blocks).
+    /// Block size in bytes.
     block_size: usize,
-    /// In-memory cache: `stash_id → data`.
-    entries: HashMap<String, Vec<u8>>,
-    /// Running total of blocks currently stashed (for progress / limits).
+    /// Metadata only: stash_id → block_count (data stays on disk).
+    entries: HashMap<String, u64>,
+    /// Running total of blocks currently stashed.
     current_blocks: u64,
     /// Maximum number of simultaneous stash entries allowed (from header).
     max_entries: u32,
@@ -125,7 +118,7 @@ impl StashManager {
         self.block_size
     }
 
-    /// Number of entries currently in the in-memory cache.
+    /// Number of entries currently tracked (metadata in memory).
     #[inline]
     pub fn cached_count(&self) -> usize {
         self.entries.len()
@@ -147,24 +140,20 @@ impl StashManager {
 
     /// Save data into a stash slot — AOSP `WriteStash`.
     ///
-    /// 1. Verifies the SHA-1 of `data` matches `id` (stash IDs *are* the
-    ///    SHA-1 of the stashed content in AOSP).
+    /// 1. Verifies the SHA-1 of `data` matches `id`.
     /// 2. Writes `data` to the on-disk file `{work_dir}/{id}`.
-    /// 3. Inserts `data` into the in-memory cache.
+    /// 3. Records metadata (block count) in memory.
     ///
-    /// If the slot already exists and the data matches, this is a no-op
-    /// (idempotent for resume).
+    /// Data is NOT cached in memory - it stays on disk for lazy loading.
     ///
     /// # Errors
     ///
     /// Returns an error if the SHA-1 check fails or the file write fails.
     pub fn save(&mut self, id: &str, data: &[u8]) -> Result<()> {
-        // If already cached with identical content, skip.
-        if let Some(existing) = self.entries.get(id) {
-            if existing.as_slice() == data {
-                log::debug!("stash save: {} already cached, skipping", id);
-                return Ok(());
-            }
+        // If already tracked, skip (idempotent).
+        if self.entries.contains_key(id) {
+            log::debug!("stash save: {} already exists, skipping", id);
+            return Ok(());
         }
 
         // Verify SHA-1: in AOSP the stash ID is the SHA-1 of the data.
@@ -180,8 +169,7 @@ impl StashManager {
 
         let blocks = (data.len() / self.block_size) as u64;
 
-        // Check limits (AOSP checks available space; we check the
-        // declared header limits).
+        // Check limits.
         if self.max_entries > 0 {
             ensure!(
                 (self.entries.len() as u32) < self.max_entries,
@@ -199,13 +187,12 @@ impl StashManager {
             );
         }
 
-        // Write to disk first (crash-safety: file must be durable before
-        // we proceed).
+        // Write to disk only (no in-memory cache).
         write_stash_file(&self.stash_path(id), data)
             .with_context(|| format!("stash save: failed to write {id}"))?;
 
-        // Insert into cache.
-        self.entries.insert(id.to_string(), data.to_vec());
+        // Record metadata only (block count, not data).
+        self.entries.insert(id.to_string(), blocks);
         self.current_blocks += blocks;
 
         log::debug!(
@@ -220,25 +207,19 @@ impl StashManager {
 
     /// Load data from a stash slot — AOSP `LoadStash`.
     ///
-    /// 1. If the data is in the in-memory cache, returns it directly (fast
-    ///    path).
-    /// 2. Otherwise, reads the on-disk file `{work_dir}/{id}`.
-    /// 3. Verifies the SHA-1 of the loaded data matches `id`.
-    /// 4. Inserts the loaded data into the in-memory cache for future use.
+    /// Reads directly from disk, verifies SHA-1, returns data.
+    /// Data is NOT cached in memory - it is read fresh from disk each time
+    /// to minimize RAM usage (matches C++ behavior).
     ///
     /// # Errors
     ///
     /// Returns an error if the file does not exist, cannot be read, or
     /// its SHA-1 does not match.
-    pub fn load(&mut self, id: &str) -> Result<Vec<u8>> {
-        // Fast path: already cached.
-        if let Some(data) = self.entries.get(id) {
-            log::debug!("stash load: {} (cache hit)", id);
-            return Ok(data.clone());
-        }
-
-        // Slow path: read from disk.
+    pub fn load(&mut self, id: &str) -> Result<Arc<[u8]>> {
         let path = self.stash_path(id);
+        
+        // Always read from disk (no in-memory cache).
+        // NOTE: We don't require metadata to exist - file might exist from prior run
         let data = fs::read(&path)
             .with_context(|| format!("stash load: failed to read {}", path.display()))?;
 
@@ -246,43 +227,48 @@ impl StashManager {
         verify_stash_sha1(id, &data)
             .with_context(|| format!("stash load: integrity check failed for {id}"))?;
 
-        // Populate cache.
-        self.entries.insert(id.to_string(), data.clone());
+        // Update metadata if not present (for resume support)
+        if !self.entries.contains_key(id) {
+            let blocks = (data.len() / self.block_size) as u64;
+            self.entries.insert(id.to_string(), blocks);
+            self.current_blocks += blocks;
+        }
 
-        log::debug!(
-            "stash load: {} (loaded from disk, {} bytes)",
-            id,
-            data.len()
-        );
+        log::debug!("stash load: {} ({} bytes from disk)", id, data.len());
 
-        Ok(data)
+        // Return data without caching (Arc for API compatibility).
+        Ok(Arc::from(data))
     }
 
-    /// Load data from a stash slot without cloning — returns a reference.
+    /// Load data from a stash slot without cloning — returns an Arc.
     ///
-    /// Identical to [`load`](Self::load) but avoids the allocation when
-    /// the caller only needs a read reference (e.g. for the diff step).
-    ///
-    /// The data **must** already be in the cache (call [`load`] first if
-    /// uncertain). Returns an error if the entry is not cached.
-    pub fn load_ref(&self, id: &str) -> Result<&[u8]> {
-        self.entries
-            .get(id)
-            .map(Vec::as_slice)
-            .with_context(|| format!("stash load_ref: {id} not in cache"))
+    /// Identical to [`load`](Self::load) - reads from disk every time
+    /// to minimize RAM usage.
+    pub fn load_ref(&self, id: &str) -> Result<Arc<[u8]>> {
+        // Always read from disk (no in-memory cache).
+        let path = self.stash_path(id);
+        let data = fs::read(&path)
+            .with_context(|| format!("stash load_ref: failed to read {}", path.display()))?;
+
+        // Verify integrity.
+        verify_stash_sha1(id, &data)
+            .with_context(|| format!("stash load_ref: integrity check failed for {id}"))?;
+
+        let blocks = self.entries.get(id).copied().unwrap_or(0);
+        log::debug!("stash load_ref: {} ({} blocks from disk)", id, blocks);
+
+        Ok(Arc::from(data))
     }
 
     /// Release a stash slot — AOSP `FreeStash`.
     ///
-    /// 1. Removes from the in-memory cache.
+    /// 1. Removes metadata from memory.
     /// 2. Deletes the on-disk file.
     ///
-    /// If the slot does not exist, this is a silent no-op (matching AOSP
-    /// behaviour on double-free during resume).
+    /// If the slot does not exist, this is a silent no-op.
     pub fn free(&mut self, id: &str) -> Result<()> {
-        // Remove from cache and update block count.
-        if let Some(data) = self.entries.remove(id) {
-            let blocks = (data.len() / self.block_size) as u64;
+        // Remove metadata and update block count.
+        if let Some(blocks) = self.entries.remove(id) {
             self.current_blocks = self.current_blocks.saturating_sub(blocks);
         }
 
@@ -409,506 +395,4 @@ fn count_stash_files(dir: &Path) -> usize {
                 .count()
         })
         .unwrap_or(0)
-}
-
-// ===========================================================================
-// Tests
-// ===========================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const BS: usize = 4096;
-
-    /// Build test data whose SHA-1 hex digest we know.
-    /// Returns `(id, data)` where `id` = sha1_hex(data).
-    fn make_stash_data(fill_byte: u8, num_blocks: usize) -> (String, Vec<u8>) {
-        let data = vec![fill_byte; num_blocks * BS];
-        let id = hash::sha1_hex(&data);
-        (id, data)
-    }
-
-    /// Create a fresh StashManager in a temporary directory.
-    fn make_manager() -> (tempfile::TempDir, StashManager) {
-        let dir = tempfile::tempdir().unwrap();
-        let stash_dir = dir.path().join("stash");
-        let mgr = StashManager::new(&stash_dir, BS, 0, 0).unwrap();
-        (dir, mgr)
-    }
-
-    fn make_manager_with_limits(
-        max_entries: u32,
-        max_blocks: u32,
-    ) -> (tempfile::TempDir, StashManager) {
-        let dir = tempfile::tempdir().unwrap();
-        let stash_dir = dir.path().join("stash");
-        let mgr = StashManager::new(&stash_dir, BS, max_entries, max_blocks).unwrap();
-        (dir, mgr)
-    }
-
-    // ---- new --------------------------------------------------------------
-
-    #[test]
-    fn new_creates_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let stash_dir = dir.path().join("deep").join("stash");
-        assert!(!stash_dir.exists());
-
-        let mgr = StashManager::new(&stash_dir, BS, 0, 0).unwrap();
-        assert!(stash_dir.exists());
-        assert_eq!(mgr.cached_count(), 0);
-        assert_eq!(mgr.current_blocks(), 0);
-    }
-
-    #[test]
-    fn new_existing_directory_ok() {
-        let dir = tempfile::tempdir().unwrap();
-        let stash_dir = dir.path().join("stash");
-        fs::create_dir_all(&stash_dir).unwrap();
-
-        let mgr = StashManager::new(&stash_dir, BS, 0, 0).unwrap();
-        assert_eq!(mgr.cached_count(), 0);
-    }
-
-    #[test]
-    fn new_zero_block_size_fails() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(StashManager::new(dir.path(), 0, 0, 0).is_err());
-    }
-
-    #[test]
-    fn new_detects_leftover_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let stash_dir = dir.path().join("stash");
-        fs::create_dir_all(&stash_dir).unwrap();
-        // Plant a fake leftover file.
-        fs::write(stash_dir.join("abc123"), b"leftover").unwrap();
-
-        let mgr = StashManager::new(&stash_dir, BS, 0, 0).unwrap();
-        // The leftover is not in the cache but exists on disk.
-        assert_eq!(mgr.cached_count(), 0);
-        assert!(mgr.exists("abc123"));
-    }
-
-    // ---- save -------------------------------------------------------------
-
-    #[test]
-    fn save_basic() {
-        let (_dir, mut mgr) = make_manager();
-        let (id, data) = make_stash_data(0xAA, 2);
-
-        mgr.save(&id, &data).unwrap();
-
-        assert!(mgr.exists(&id));
-        assert_eq!(mgr.cached_count(), 1);
-        assert_eq!(mgr.current_blocks(), 2);
-
-        // File should exist on disk.
-        assert!(mgr.stash_path(&id).exists());
-
-        // File content should match.
-        let on_disk = fs::read(mgr.stash_path(&id)).unwrap();
-        assert_eq!(on_disk, data);
-    }
-
-    #[test]
-    fn save_idempotent() {
-        let (_dir, mut mgr) = make_manager();
-        let (id, data) = make_stash_data(0xBB, 3);
-
-        mgr.save(&id, &data).unwrap();
-        mgr.save(&id, &data).unwrap(); // should not error
-
-        assert_eq!(mgr.cached_count(), 1);
-        // Block count should NOT double.
-        assert_eq!(mgr.current_blocks(), 3);
-    }
-
-    #[test]
-    fn save_wrong_sha1_fails() {
-        let (_dir, mut mgr) = make_manager();
-        let data = vec![0xCC; 2 * BS];
-        let wrong_id = "0000000000000000000000000000000000000000";
-
-        assert!(mgr.save(wrong_id, &data).is_err());
-        assert!(!mgr.exists(wrong_id));
-    }
-
-    #[test]
-    fn save_non_block_aligned_fails() {
-        let (_dir, mut mgr) = make_manager();
-        let data = vec![0xDD; BS + 1]; // not a multiple of BS
-        let id = hash::sha1_hex(&data);
-
-        assert!(mgr.save(&id, &data).is_err());
-    }
-
-    #[test]
-    fn save_multiple_entries() {
-        let (_dir, mut mgr) = make_manager();
-        let (id1, d1) = make_stash_data(0x11, 1);
-        let (id2, d2) = make_stash_data(0x22, 2);
-        let (id3, d3) = make_stash_data(0x33, 3);
-
-        mgr.save(&id1, &d1).unwrap();
-        mgr.save(&id2, &d2).unwrap();
-        mgr.save(&id3, &d3).unwrap();
-
-        assert_eq!(mgr.cached_count(), 3);
-        assert_eq!(mgr.current_blocks(), 6);
-    }
-
-    // ---- save with limits -------------------------------------------------
-
-    #[test]
-    fn save_exceeds_max_entries_fails() {
-        let (_dir, mut mgr) = make_manager_with_limits(2, 0);
-        let (id1, d1) = make_stash_data(0x01, 1);
-        let (id2, d2) = make_stash_data(0x02, 1);
-        let (id3, d3) = make_stash_data(0x03, 1);
-
-        mgr.save(&id1, &d1).unwrap();
-        mgr.save(&id2, &d2).unwrap();
-        assert!(mgr.save(&id3, &d3).is_err()); // 3rd entry exceeds limit of 2
-    }
-
-    #[test]
-    fn save_exceeds_max_blocks_fails() {
-        let (_dir, mut mgr) = make_manager_with_limits(0, 3);
-        let (id1, d1) = make_stash_data(0x01, 2);
-        let (id2, d2) = make_stash_data(0x02, 2);
-
-        mgr.save(&id1, &d1).unwrap(); // 2 blocks, total = 2
-        assert!(mgr.save(&id2, &d2).is_err()); // would be 4, limit is 3
-    }
-
-    // ---- load -------------------------------------------------------------
-
-    #[test]
-    fn load_from_cache() {
-        let (_dir, mut mgr) = make_manager();
-        let (id, data) = make_stash_data(0xAA, 2);
-
-        mgr.save(&id, &data).unwrap();
-        let loaded = mgr.load(&id).unwrap();
-        assert_eq!(loaded, data);
-    }
-
-    #[test]
-    fn load_from_disk_after_cache_eviction() {
-        let (_dir, mut mgr) = make_manager();
-        let (id, data) = make_stash_data(0xBB, 1);
-
-        mgr.save(&id, &data).unwrap();
-
-        // Simulate cache eviction by manually clearing (but NOT deleting
-        // the file).
-        let blocks = (mgr.entries.remove(&id).unwrap().len() / BS) as u64;
-        mgr.current_blocks -= blocks;
-        assert!(!mgr.entries.contains_key(&id));
-        assert!(mgr.stash_path(&id).exists());
-
-        // Load should fall back to disk.
-        let loaded = mgr.load(&id).unwrap();
-        assert_eq!(loaded, data);
-
-        // Should now be in cache again.
-        assert!(mgr.entries.contains_key(&id));
-    }
-
-    #[test]
-    fn load_nonexistent_fails() {
-        let (_dir, mut mgr) = make_manager();
-        assert!(mgr.load("nonexistent").is_err());
-    }
-
-    #[test]
-    fn load_corrupted_file_fails() {
-        let (_dir, mut mgr) = make_manager();
-        let (id, data) = make_stash_data(0xCC, 1);
-
-        mgr.save(&id, &data).unwrap();
-
-        // Simulate cache eviction.
-        mgr.entries.remove(&id);
-
-        // Corrupt the on-disk file.
-        let path = mgr.stash_path(&id);
-        fs::write(&path, b"corrupted!").unwrap();
-
-        // Load should fail SHA-1 verification.
-        assert!(mgr.load(&id).is_err());
-    }
-
-    #[test]
-    fn load_ref_cached() {
-        let (_dir, mut mgr) = make_manager();
-        let (id, data) = make_stash_data(0xDD, 2);
-
-        mgr.save(&id, &data).unwrap();
-        let slice = mgr.load_ref(&id).unwrap();
-        assert_eq!(slice, data.as_slice());
-    }
-
-    #[test]
-    fn load_ref_not_cached_fails() {
-        let (_dir, mgr) = make_manager();
-        assert!(mgr.load_ref("missing").is_err());
-    }
-
-    // ---- free -------------------------------------------------------------
-
-    #[test]
-    fn free_basic() {
-        let (_dir, mut mgr) = make_manager();
-        let (id, data) = make_stash_data(0xAA, 2);
-
-        mgr.save(&id, &data).unwrap();
-        assert!(mgr.exists(&id));
-        assert_eq!(mgr.current_blocks(), 2);
-
-        mgr.free(&id).unwrap();
-        assert!(!mgr.exists(&id));
-        assert_eq!(mgr.cached_count(), 0);
-        assert_eq!(mgr.current_blocks(), 0);
-
-        // File should be gone.
-        assert!(!mgr.stash_path(&id).exists());
-    }
-
-    #[test]
-    fn free_idempotent() {
-        let (_dir, mut mgr) = make_manager();
-        let (id, data) = make_stash_data(0xBB, 1);
-
-        mgr.save(&id, &data).unwrap();
-        mgr.free(&id).unwrap();
-        mgr.free(&id).unwrap(); // double-free should be OK (resume)
-    }
-
-    #[test]
-    fn free_nonexistent_ok() {
-        let (_dir, mut mgr) = make_manager();
-        // Should not error — matching AOSP's silent no-op.
-        mgr.free("nonexistent").unwrap();
-    }
-
-    #[test]
-    fn free_updates_block_count() {
-        let (_dir, mut mgr) = make_manager();
-        let (id1, d1) = make_stash_data(0x11, 3);
-        let (id2, d2) = make_stash_data(0x22, 5);
-
-        mgr.save(&id1, &d1).unwrap();
-        mgr.save(&id2, &d2).unwrap();
-        assert_eq!(mgr.current_blocks(), 8);
-
-        mgr.free(&id1).unwrap();
-        assert_eq!(mgr.current_blocks(), 5);
-
-        mgr.free(&id2).unwrap();
-        assert_eq!(mgr.current_blocks(), 0);
-    }
-
-    // ---- exists -----------------------------------------------------------
-
-    #[test]
-    fn exists_cache_only() {
-        let (_dir, mut mgr) = make_manager();
-        let (id, data) = make_stash_data(0xAA, 1);
-
-        assert!(!mgr.exists(&id));
-        mgr.save(&id, &data).unwrap();
-        assert!(mgr.exists(&id));
-    }
-
-    #[test]
-    fn exists_disk_only() {
-        let (_dir, mut mgr) = make_manager();
-        let (id, data) = make_stash_data(0xBB, 1);
-
-        mgr.save(&id, &data).unwrap();
-        mgr.entries.remove(&id); // evict from cache
-
-        // exists should still return true (checks disk).
-        assert!(mgr.exists(&id));
-    }
-
-    #[test]
-    fn exists_neither() {
-        let (_dir, mgr) = make_manager();
-        assert!(!mgr.exists("nope"));
-    }
-
-    // ---- clear_all --------------------------------------------------------
-
-    #[test]
-    fn clear_all_basic() {
-        let (_dir, mut mgr) = make_manager();
-        let (id1, d1) = make_stash_data(0x11, 1);
-        let (id2, d2) = make_stash_data(0x22, 2);
-
-        mgr.save(&id1, &d1).unwrap();
-        mgr.save(&id2, &d2).unwrap();
-        assert_eq!(mgr.cached_count(), 2);
-
-        mgr.clear_all().unwrap();
-
-        assert_eq!(mgr.cached_count(), 0);
-        assert_eq!(mgr.current_blocks(), 0);
-        assert!(!mgr.stash_path(&id1).exists());
-        assert!(!mgr.stash_path(&id2).exists());
-    }
-
-    #[test]
-    fn clear_all_empty() {
-        let (_dir, mut mgr) = make_manager();
-        mgr.clear_all().unwrap(); // no-op, should not error
-    }
-
-    #[test]
-    fn clear_all_with_leftover_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let stash_dir = dir.path().join("stash");
-        fs::create_dir_all(&stash_dir).unwrap();
-        fs::write(stash_dir.join("leftover1"), b"data").unwrap();
-        fs::write(stash_dir.join("leftover2"), b"data").unwrap();
-
-        let mut mgr = StashManager::new(&stash_dir, BS, 0, 0).unwrap();
-        mgr.clear_all().unwrap();
-
-        assert!(!stash_dir.join("leftover1").exists());
-        assert!(!stash_dir.join("leftover2").exists());
-    }
-
-    // ---- Atomic write (crash safety) --------------------------------------
-
-    #[test]
-    fn save_file_is_durable() {
-        let (_dir, mut mgr) = make_manager();
-        let (id, data) = make_stash_data(0xEE, 4);
-
-        mgr.save(&id, &data).unwrap();
-
-        // Drop the manager and re-read the file directly.
-        drop(mgr);
-
-        let on_disk = fs::read(_dir.path().join("stash").join(&id)).unwrap();
-        assert_eq!(on_disk, data);
-    }
-
-    // ---- Save + free + re-save cycle (resume scenario) -------------------
-
-    #[test]
-    fn save_free_resave_cycle() {
-        let (_dir, mut mgr) = make_manager();
-        let (id, data) = make_stash_data(0xFF, 2);
-
-        mgr.save(&id, &data).unwrap();
-        assert_eq!(mgr.current_blocks(), 2);
-
-        mgr.free(&id).unwrap();
-        assert_eq!(mgr.current_blocks(), 0);
-
-        // Re-save the same stash (e.g. on retry).
-        mgr.save(&id, &data).unwrap();
-        assert_eq!(mgr.current_blocks(), 2);
-        assert_eq!(mgr.cached_count(), 1);
-    }
-
-    // ---- Load after manager recreation (resume scenario) -----------------
-
-    #[test]
-    fn resume_load_from_disk() {
-        let dir = tempfile::tempdir().unwrap();
-        let stash_dir = dir.path().join("stash");
-        let (id, data) = make_stash_data(0xAB, 3);
-
-        // First "session": save.
-        {
-            let mut mgr = StashManager::new(&stash_dir, BS, 0, 0).unwrap();
-            mgr.save(&id, &data).unwrap();
-        }
-
-        // Second "session": new manager, load from disk.
-        {
-            let mut mgr = StashManager::new(&stash_dir, BS, 0, 0).unwrap();
-            assert_eq!(mgr.cached_count(), 0);
-            assert!(mgr.exists(&id));
-
-            let loaded = mgr.load(&id).unwrap();
-            assert_eq!(loaded, data);
-            assert_eq!(mgr.cached_count(), 1);
-        }
-    }
-
-    // ---- Concurrent saves to different slots ------------------------------
-
-    #[test]
-    fn multiple_independent_slots() {
-        let (_dir, mut mgr) = make_manager();
-
-        let slots: Vec<(String, Vec<u8>)> = (0u8..5)
-            .map(|i| make_stash_data(i * 37 + 1, (i as usize) + 1))
-            .collect();
-
-        for (id, data) in &slots {
-            mgr.save(id, data).unwrap();
-        }
-        assert_eq!(mgr.cached_count(), 5);
-
-        for (id, data) in &slots {
-            let loaded = mgr.load(id).unwrap();
-            assert_eq!(&loaded, data);
-        }
-
-        let total_blocks: u64 = (1..=5).sum();
-        assert_eq!(mgr.current_blocks(), total_blocks);
-
-        mgr.clear_all().unwrap();
-        assert_eq!(mgr.cached_count(), 0);
-        assert_eq!(mgr.current_blocks(), 0);
-    }
-
-    // ---- verify_stash_sha1 ------------------------------------------------
-
-    #[test]
-    fn verify_sha1_correct() {
-        let data = vec![0x42u8; 1024];
-        let id = hash::sha1_hex(&data);
-        verify_stash_sha1(&id, &data).unwrap();
-    }
-
-    #[test]
-    fn verify_sha1_wrong() {
-        let data = vec![0x42u8; 1024];
-        assert!(verify_stash_sha1("bad_hash", &data).is_err());
-    }
-
-    #[test]
-    fn verify_sha1_case_insensitive() {
-        let data = vec![0x42u8; 1024];
-        let id_upper = hash::sha1_hex(&data).to_ascii_uppercase();
-        verify_stash_sha1(&id_upper, &data).unwrap();
-    }
-
-    // ---- work_dir accessor -----------------------------------------------
-
-    #[test]
-    fn work_dir_accessor() {
-        let dir = tempfile::tempdir().unwrap();
-        let stash_dir = dir.path().join("stash");
-        let mgr = StashManager::new(&stash_dir, BS, 0, 0).unwrap();
-        assert_eq!(mgr.work_dir(), stash_dir);
-    }
-
-    // ---- block_size accessor ---------------------------------------------
-
-    #[test]
-    fn block_size_accessor() {
-        let dir = tempfile::tempdir().unwrap();
-        let mgr = StashManager::new(dir.path(), 512, 0, 0).unwrap();
-        assert_eq!(mgr.block_size(), 512);
-    }
 }

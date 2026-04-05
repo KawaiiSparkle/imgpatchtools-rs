@@ -43,6 +43,15 @@ pub struct FunctionContext {
     /// When true, getprop returns tolerant defaults instead of trying device props.
     /// Used by batch mode and when scripts reference compressed data files.
     pub offline_mode: bool,
+    /// When true, skip all function calls except ui_print and block_image_update.
+    /// Enabled when script contains compressed data files (.dat.br, .dat.lzma).
+    pub skip_mode: bool,
+    /// When true (default), only execute apply_patch, block_image_update and abort.
+    /// When false (verify mode), execute all commands including verify and assertions.
+    pub fast_mode: bool,
+    /// Tracks extracted files: source filename -> first target partition name
+    /// Used by package_extract_file to decide whether to rename (first time) or copy (subsequent)
+    pub extracted_files: HashMap<String, String>,
 }
 
 impl FunctionContext {
@@ -72,7 +81,7 @@ impl FunctionContext {
         Path::new(&self.workdir).join(format!("{pn}.img"))
     }
 
-    fn extract_partition_name(device_path: &str) -> &str {
+    pub fn extract_partition_name(device_path: &str) -> &str {
         let p = device_path.strip_prefix("EMMC:").unwrap_or(device_path);
         let n = if let Some(i) = p.rfind("/by-name/") {
             &p[i + 9..]
@@ -260,27 +269,79 @@ fn fn_package_extract_file(ctx: &mut FunctionContext, args: &[Value]) -> Result<
         bail!("package_extract_file: need 1+ arg");
     }
     let src = args[0].as_str();
+    let src_filename = Path::new(src)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| src.to_string());
+
     if args.len() == 1 {
         return Ok(Value::String(
             ctx.resolve_package_path(src).to_string_lossy().into(),
         ));
     }
     let dst = args[1].as_str();
-    let sp = ctx.resolve_package_path(src);
-    let dp = if Path::new(dst).is_absolute() && !Path::new(dst).exists() {
-        ctx.resolve_or_create_image_path(dst)
-    } else if Path::new(dst).exists() {
-        PathBuf::from(dst)
+
+    // Handle device paths (e.g., /dev/block/... or EMMC:...)
+    // Extract partition name from the device path and add .img extension
+    let partition_name = if dst.starts_with("/dev/") || dst.starts_with("EMMC:") {
+        let name = FunctionContext::extract_partition_name(dst);
+        format!("{}.img", name)
     } else {
-        ctx.resolve_package_path(dst)
+        // For non-device paths, use the destination filename
+        Path::new(dst)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| dst.to_string())
     };
+
+    let dp = Path::new(&ctx.workdir).join(&partition_name);
+
+    // Check if this source file has been extracted before
+    let (sp, operation) = if let Some(first_target) = ctx.extracted_files.get(&src_filename) {
+        // Source file already extracted - need to copy from the first target
+        if first_target == &partition_name {
+            // Same target, skip
+            log::debug!("package_extract_file: {} already extracted to {}, skipping", src_filename, partition_name);
+            return Ok(Value::String("t".into()));
+        }
+        // Different target - copy from the first extracted location
+        let first_path = Path::new(&ctx.workdir).join(first_target);
+        (first_path, "copy")
+    } else {
+        // First time seeing this source - resolve source path
+        let workdir_path = Path::new(&ctx.workdir).join(&src_filename);
+        let sp = if workdir_path.exists() {
+            workdir_path
+        } else {
+            ctx.resolve_package_path(src)
+        };
+        
+        // Skip if source and destination are the same file
+        if sp == dp {
+            log::debug!("package_extract_file: source and destination are the same, skipping");
+            return Ok(Value::String("t".into()));
+        }
+        
+        (sp, "rename")
+    };
+
     if let Some(par) = dp.parent() {
         if !par.exists() {
             std::fs::create_dir_all(par)?;
         }
     }
-    log::info!("package_extract_file: {} → {}", sp.display(), dp.display());
-    std::fs::copy(&sp, &dp).with_context(|| format!("copy {} → {}", sp.display(), dp.display()))?;
+
+    if operation == "rename" {
+        // First extraction: rename the file
+        log::info!("package_extract_file: renaming {} → {} (partition: {})", sp.display(), dp.display(), partition_name);
+        std::fs::rename(&sp, &dp).with_context(|| format!("rename {} → {}", sp.display(), dp.display()))?;
+        ctx.extracted_files.insert(src_filename.clone(), partition_name.clone());
+    } else {
+        // Subsequent extraction: copy from the first extracted location
+        log::info!("package_extract_file: copying {} → {} (partition: {})", sp.display(), dp.display(), partition_name);
+        std::fs::copy(&sp, &dp).with_context(|| format!("copy {} → {}", sp.display(), dp.display()))?;
+    }
+
     Ok(Value::String("t".into()))
 }
 
@@ -883,23 +944,26 @@ pub fn run_script(
     run_script_offline(script, registry, workdir, false)
 }
 
-/// Run an edify script with optional offline mode.
+/// Run an edify script with fast mode or verify mode.
 ///
-/// In offline mode, `getprop` returns tolerant defaults and never aborts.
-/// This is used by batch processing where no real device properties are available.
-pub fn run_script_offline(
+/// In fast mode (verify=false), only apply_patch, block_image_update and abort are executed.
+/// In verify mode (verify=true), all commands including block_image_verify and assertions are executed.
+pub fn run_script_with_mode(
     script: &str,
     registry: &FunctionRegistry,
     workdir: &str,
-    offline_mode: bool,
+    verify: bool,
 ) -> Result<ScriptResult> {
-    // Pre-scan: detect if the script references compressed data files.
-    // If so, automatically enable offline mode for getprop tolerance.
-    let effective_offline =
-        offline_mode || script.contains(".dat.br") || script.contains(".dat.lzma");
+    let has_compressed_data = script.contains(".dat.br") || script.contains(".dat.lzma");
+    let effective_offline = has_compressed_data;
 
     if effective_offline {
         log::info!("edify: offline mode enabled (getprop will return tolerant defaults)");
+    }
+    if !verify {
+        log::info!("edify: fast mode enabled (only apply_patch, block_image_update and abort will execute)");
+    } else {
+        log::info!("edify: verify mode enabled (all commands will execute)");
     }
 
     let ast = parse_edify(script).context("edify parse error")?;
@@ -909,6 +973,52 @@ pub fn run_script_offline(
         workdir: workdir.to_string(),
         dynamic_partitions: None,
         offline_mode: effective_offline,
+        skip_mode: has_compressed_data,
+        fast_mode: !verify,
+        extracted_files: HashMap::new(),
+    };
+    let value = eval(&ast, &mut ctx, registry)?;
+    Ok(ScriptResult {
+        value,
+        dynamic_partitions: ctx.dynamic_partitions,
+    })
+}
+
+/// Run an edify script with optional offline mode.
+///
+/// In offline mode, `getprop` returns tolerant defaults and never aborts.
+/// This is used by batch processing where no real device properties are available.
+///
+/// When the script contains compressed data files (.dat.br, .dat.lzma), skip mode
+/// is enabled which skips all function calls except ui_print and block_image_update.
+pub fn run_script_offline(
+    script: &str,
+    registry: &FunctionRegistry,
+    workdir: &str,
+    offline_mode: bool,
+) -> Result<ScriptResult> {
+    // Pre-scan: detect if the script references compressed data files.
+    // If so, automatically enable offline mode for getprop tolerance and skip mode.
+    let has_compressed_data = script.contains(".dat.br") || script.contains(".dat.lzma");
+    let effective_offline = offline_mode || has_compressed_data;
+
+    if effective_offline {
+        log::info!("edify: offline mode enabled (getprop will return tolerant defaults)");
+    }
+    if has_compressed_data {
+        log::info!("edify: skip mode enabled (only ui_print and block_image_update will execute)");
+    }
+
+    let ast = parse_edify(script).context("edify parse error")?;
+    let mut ctx = FunctionContext {
+        current_function: String::new(),
+        progress: new_progress(false),
+        workdir: workdir.to_string(),
+        dynamic_partitions: None,
+        offline_mode: effective_offline,
+        skip_mode: has_compressed_data,
+        fast_mode: false, // Backward compatibility: run all commands
+        extracted_files: HashMap::new(),
     };
     let value = eval(&ast, &mut ctx, registry)?;
     Ok(ScriptResult {
@@ -927,7 +1037,29 @@ fn eval(expr: &Expr, ctx: &mut FunctionContext, reg: &FunctionRegistry) -> Resul
             if name == "assert" {
                 return eval_assert(args, ctx, reg);
             }
+            // Skip mode: allow ui_print, block_image_update, and package_extract_file
+            // (package_extract_file is needed by block_image_update to resolve paths)
+            if ctx.skip_mode && name != "ui_print" && name != "block_image_update" && name != "package_extract_file" {
+                log::debug!("edify: skip_mode skipping function '{}'", name);
+                return Ok(Value::String(String::new()));
+            }
+            // Fast mode: only execute apply_patch, block_image_update, abort and package_extract_file
+            // (package_extract_file is needed by block_image_update to resolve file paths)
+            if ctx.fast_mode && name != "apply_patch" && name != "block_image_update" && name != "abort" && name != "package_extract_file" {
+                log::debug!("edify: fast_mode skipping function '{}'", name);
+                return Ok(Value::String(String::new()));
+            }
+
             ctx.current_function = name.clone();
+
+            // Show simplified log message for main operations
+            let start = std::time::Instant::now();
+            let log_msg = get_simplified_log(name, args);
+            let has_log = log_msg.is_some();
+            if let Some(ref msg) = log_msg {
+                log::info!("[{}] {}", name, msg);
+            }
+
             let vals: Vec<Value> = args
                 .iter()
                 .map(|a| eval(a, ctx, reg))
@@ -935,7 +1067,15 @@ fn eval(expr: &Expr, ctx: &mut FunctionContext, reg: &FunctionRegistry) -> Resul
             let f = reg
                 .get(name)
                 .ok_or_else(|| anyhow::anyhow!("unknown function: {name}"))?;
-            f(ctx, &vals)
+            let result = f(ctx, &vals);
+
+            // Log completion time for main operations
+            if has_log {
+                let elapsed = start.elapsed();
+                log::info!("[{}] completed in {:.2}s", name, elapsed.as_secs_f64());
+            }
+
+            result
         }
         Expr::Sequence(es) => {
             let mut last = Value::String(String::new());
@@ -989,6 +1129,77 @@ fn eval(expr: &Expr, ctx: &mut FunctionContext, reg: &FunctionRegistry) -> Resul
                 Ok(Value::String(format!("{}{}", l.as_str(), r.as_str())))
             }
         },
+    }
+}
+
+/// Generate simplified log message for main operations.
+/// Returns None if no simplified message should be shown.
+fn get_simplified_log(name: &str, args: &[Expr]) -> Option<String> {
+    match name {
+        "apply_patch" => {
+            // apply_patch(device_path, source_hash, target_hash, target_size, patch_path)
+            // Show "Updating Boot Image" based on device path
+            if let Some(Expr::StringLiteral(device_path)) = args.first() {
+                let partition = extract_partition_name_from_path(device_path);
+                let display_name = format_partition_display(partition);
+                Some(format!("Updating {} Image", display_name))
+            } else {
+                Some("Updating Image".to_string())
+            }
+        }
+        "block_image_update" => {
+            // block_image_update(device_path, transfer_list, new_data, patch_data)
+            // Show "Updating system Partition"
+            if let Some(Expr::StringLiteral(device_path)) = args.first() {
+                let partition = extract_partition_name_from_path(device_path);
+                let display_name = format_partition_display(partition);
+                Some(format!("Updating {} Partition", display_name))
+            } else {
+                Some("Updating Partition".to_string())
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Extract partition name from device path like "/dev/block/.../by-name/boot" or "EMMC:/dev/.../boot:..."
+fn extract_partition_name_from_path(path: &str) -> &str {
+    let p = path.strip_prefix("EMMC:").unwrap_or(path);
+    let n = if let Some(i) = p.rfind("/by-name/") {
+        &p[i + 9..]
+    } else if let Some(i) = p.rfind('/') {
+        &p[i + 1..]
+    } else {
+        p
+    };
+    n.split(':').next().unwrap_or(n)
+}
+
+/// Format partition name for display (capitalize first letter, handle special cases)
+fn format_partition_display(name: &str) -> String {
+    let mut result = String::new();
+    let mut capitalize_next = true;
+    for c in name.chars() {
+        if c == '_' || c == '-' {
+            result.push(' ');
+            capitalize_next = true;
+        } else if capitalize_next {
+            result.push(c.to_ascii_uppercase());
+            capitalize_next = false;
+        } else {
+            result.push(c);
+        }
+    }
+    // Handle special cases
+    match result.to_lowercase().as_str() {
+        s if s.contains("boot") && !s.contains("bootloader") => "Boot".to_string(),
+        s if s.contains("system") => "System".to_string(),
+        s if s.contains("vendor") => "Vendor".to_string(),
+        s if s.contains("product") => "Product".to_string(),
+        s if s.contains("recovery") => "Recovery".to_string(),
+        s if s.contains("userdata") || s == "data" => "Data".to_string(),
+        s if s.contains("cache") => "Cache".to_string(),
+        _ => result,
     }
 }
 

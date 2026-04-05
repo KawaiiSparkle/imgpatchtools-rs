@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::Args;
 
-use super::functions::{builtin_registry, run_script};
+use super::functions::{builtin_registry, run_script_with_mode};
 use crate::core::super_img::builder::{GroupInfo, *};
 use crate::core::super_img::lp_metadata::*;
 use crate::core::super_img::op_list::DynamicPartitionState;
@@ -20,6 +20,11 @@ pub struct EdifyArgs {
     /// Working directory.
     #[arg(short, long, default_value = ".")]
     pub workdir: String,
+
+    /// Verify mode: execute all commands including block_image_verify and assertions.
+    /// Without this flag, only apply_patch, block_image_update and abort are executed.
+    #[arg(long)]
+    pub verify: bool,
 }
 
 pub fn run(args: &EdifyArgs, verbose: bool) -> Result<()> {
@@ -29,10 +34,15 @@ pub fn run(args: &EdifyArgs, verbose: bool) -> Result<()> {
     if verbose {
         log::info!("edify: executing {}", args.script.display());
         log::info!("edify: workdir = {}", args.workdir);
+        if args.verify {
+            log::info!("edify: verify mode enabled (all commands will execute)");
+        } else {
+            log::info!("edify: fast mode (only apply_patch and block_image_update will execute)");
+        }
     }
 
     let registry = builtin_registry();
-    let result = run_script(&content, &registry, &args.workdir)?;
+    let result = run_script_with_mode(&content, &registry, &args.workdir, args.verify)?;
 
     if verbose {
         log::info!("edify: result = {:?}", result.value.as_str());

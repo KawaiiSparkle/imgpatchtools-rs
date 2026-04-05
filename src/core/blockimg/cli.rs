@@ -8,6 +8,11 @@ use clap::{Args, Subcommand};
 use super::update;
 use super::verify;
 
+/// Returns the default stash directory path (cross-platform).
+fn default_stash_dir() -> PathBuf {
+    std::env::temp_dir().join("imgpatchtools-stash")
+}
+
 /// Arguments for the `blockimg` subcommand.
 #[derive(Args, Debug, Clone)]
 pub struct BlockimgArgs {
@@ -37,9 +42,9 @@ pub enum BlockimgCommand {
         #[arg(long)]
         source: Option<PathBuf>,
 
-        /// Directory for temporary stash files.
-        #[arg(long, default_value = "/tmp/imgpatchtools-stash")]
-        stash_dir: PathBuf,
+        /// Directory for temporary stash files (default: system temp dir).
+        #[arg(long)]
+        stash_dir: Option<PathBuf>,
 
         /// Path to a resume checkpoint file (last_command).
         #[arg(long)]
@@ -80,16 +85,19 @@ pub fn run(args: &BlockimgArgs, verbose: bool) -> Result<()> {
             source,
             stash_dir,
             resume_file,
-        } => update::block_image_update(
-            target,
-            transfer_list,
-            new_data,
-            patch_data,
-            source.as_deref(),
-            stash_dir,
-            verbose,
-            resume_file.as_deref(),
-        ),
+        } => {
+            let stash_dir = stash_dir.clone().unwrap_or_else(default_stash_dir);
+            update::block_image_update(
+                target,
+                transfer_list,
+                new_data,
+                patch_data,
+                source.as_deref(),
+                &stash_dir,
+                verbose,
+                resume_file.as_deref(),
+            )
+        }
 
         BlockimgCommand::Verify {
             target,

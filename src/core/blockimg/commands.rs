@@ -76,6 +76,9 @@ pub fn execute_transfer_list(
         );
     }
 
+    // Check if this is a full OTA (no source image)
+    let is_full_ota = ctx.source.is_none();
+
     let progress_total: u64 = list
         .commands
         .iter()
@@ -90,6 +93,24 @@ pub fn execute_transfer_list(
 
         // Reset the intra-command progress tracker
         ctx.blocks_advanced_this_cmd = 0;
+
+        // Skip erase/zero commands in full OTA mode for speed optimization
+        // These commands are unnecessary for full OTAs and produce the same result
+        if is_full_ota {
+            match cmd.cmd_type {
+                crate::core::blockimg::transfer_list::CommandType::Erase |
+                crate::core::blockimg::transfer_list::CommandType::Zero => {
+                    log::debug!("skipping {} command in full OTA mode", cmd.cmd_type.as_str());
+                    // Still advance progress as if we processed it
+                    let processed = cmd.target_ranges.as_ref().map_or(0, |r: &RangeSet| r.blocks());
+                    if processed > 0 {
+                        ctx.progress.advance(processed);
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
 
         execute_command(registry, ctx, cmd).with_context(|| {
             format!(

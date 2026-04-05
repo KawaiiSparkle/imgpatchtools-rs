@@ -125,7 +125,9 @@ fn process_normal(
     output: &mut Vec<u8>,
 ) -> Result<()> {
     let src_slice = source_slice(source, src_start, src_len)?;
-    let patched = bspatch::apply_bspatch_at(src_slice, patch, patch_offset as usize)
+    let patch_offset_usize = patch_offset.try_into()
+        .context("patch_offset too large for usize")?;
+    let patched = bspatch::apply_bspatch_at(src_slice, patch, patch_offset_usize)
         .context("NORMAL chunk: bsdiff failed")?;
     output.extend_from_slice(&patched);
     Ok(())
@@ -169,11 +171,15 @@ fn process_deflate(
 ) -> Result<()> {
     // 1. Inflate the source raw-deflate stream.
     let src_compressed = source_slice(source, src_start, src_len)?;
-    let inflated = inflate_raw(src_compressed, src_expanded_len as usize)
+    let src_expanded_len_usize = src_expanded_len.try_into()
+        .context("src_expanded_len too large for usize")?;
+    let inflated = inflate_raw(src_compressed, src_expanded_len_usize)
         .context("DEFLATE chunk: inflate source")?;
 
     // 2. Apply bsdiff to the inflated data.
-    let patched = bspatch::apply_bspatch_at(&inflated, patch, patch_offset as usize)
+    let patch_offset_usize = patch_offset.try_into()
+        .context("patch_offset too large for usize")?;
+    let patched = bspatch::apply_bspatch_at(&inflated, patch, patch_offset_usize)
         .context("DEFLATE chunk: bsdiff")?;
 
     // 3. Recompress with the exact parameters from the patch.
@@ -219,11 +225,15 @@ fn process_gzip(
     let deflate_data = &gzip_entry[src_hdr_len..gzip_entry.len() - 8];
 
     // 3. Inflate the raw deflate stream.
-    let inflated = inflate_raw(deflate_data, src_expanded_len as usize)
+    let src_expanded_len_usize = src_expanded_len.try_into()
+        .context("src_expanded_len too large for usize")?;
+    let inflated = inflate_raw(deflate_data, src_expanded_len_usize)
         .context("GZIP chunk: inflate source")?;
 
     // 4. Apply bsdiff to the inflated data.
-    let patched = bspatch::apply_bspatch_at(&inflated, patch, patch_offset as usize)
+    let patch_offset_usize = patch_offset.try_into()
+        .context("patch_offset too large for usize")?;
+    let patched = bspatch::apply_bspatch_at(&inflated, patch, patch_offset_usize)
         .context("GZIP chunk: bsdiff")?;
 
     // 5. Recompress with the exact parameters recorded in the patch.
@@ -311,10 +321,21 @@ fn deflate_raw_exact(data: &[u8], params: &DeflateParams) -> Result<Vec<u8>> {
 
 /// Bounds-checked extraction of a source sub-slice.
 fn source_slice(source: &[u8], start: u64, len: u64) -> Result<&[u8]> {
-    let s = start as usize;
+    // Validate start doesn't overflow usize
+    let s: usize = start.try_into()
+        .context("source slice start too large for usize")?;
+    
+    // Handle zero-length slice (valid but empty)
+    if len == 0 {
+        return Ok(&[]);
+    }
+    
+    let len_usize = len.try_into()
+        .context("source slice len too large for usize")?;
     let e = s
-        .checked_add(len as usize)
+        .checked_add(len_usize)
         .context("source slice range overflow")?;
+    
     ensure!(
         e <= source.len(),
         "source slice [{s}, {e}) exceeds source length {}",

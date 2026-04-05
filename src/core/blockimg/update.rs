@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use super::commands::{builtin_registry, execute_transfer_list};
-use super::context::{CommandContext, NewDataReader, PatchDataReader};
+use super::context::{CommandContext, ParallelNewDataReader, PatchDataReader};
 use super::stash::StashManager;
 use super::transfer_list::{parse_transfer_list, TransferList};
 use crate::util::io::BlockFile;
@@ -49,7 +49,7 @@ pub fn block_image_update(
         initialise_target_from_source(src, &mut target, &tl)?;
     }
 
-    let new_data = NewDataReader::open(new_data_path)
+    let new_data = ParallelNewDataReader::open(new_data_path)
         .with_context(|| format!("failed to open new-data {}", new_data_path.display()))?;
 
     let patch_data = PatchDataReader::open(patch_data_path)
@@ -94,22 +94,37 @@ pub fn block_image_update(
 }
 
 pub fn range_sha1(file_path: &Path, ranges_str: &str, block_size: usize) -> Result<String> {
-    let bf = BlockFile::open(file_path, block_size)
-        .with_context(|| format!("failed to open {}", file_path.display()))?;
+    use memmap2::MmapOptions;
+    use sha1::{Digest, Sha1};
+
     let ranges =
         crate::util::rangeset::RangeSet::parse(ranges_str).context("failed to parse ranges")?;
 
-    use sha1::{Digest, Sha1};
-    let mut hasher = Sha1::new();
-    bf.chunked_read_ranges(&ranges, |chunk| {
-        hasher.update(chunk);
-        Ok(())
-    })
-    .context("failed to read ranges for sha1")?;
+    // Open file and mmap for zero-copy access (eliminates read syscalls)
+    let file = std::fs::File::open(file_path)
+        .with_context(|| format!("failed to open {}", file_path.display()))?;
+    
+    let file_len = file.metadata()?.len();
+    if file_len == 0 {
+        // Empty file - return SHA1 of empty data
+        let hasher = Sha1::new();
+        let res = hasher.finalize();
+        return Ok(res.iter().map(|b| format!("{:02x}", b)).collect());
+    }
 
+    // Memory map the entire file for direct access - much faster than read()
+    let mmap = unsafe { MmapOptions::new().map(&file)? };
+
+    // Sequential SHA1 computation (must be in order)
+    let mut hasher = Sha1::new();
+    for (start, end) in ranges.iter() {
+        let start_byte = (start as usize) * block_size;
+        let end_byte = ((end as usize) * block_size).min(file_len as usize);
+        hasher.update(&mmap[start_byte..end_byte]);
+    }
+    
     let res = hasher.finalize();
-    let hex_str = res.iter().map(|b| format!("{:02x}", b)).collect::<String>();
-    Ok(hex_str)
+    Ok(res.iter().map(|b| format!("{:02x}", b)).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -172,23 +187,23 @@ fn open_or_create_target(path: &Path, tl: &TransferList) -> Result<BlockFile> {
                 path.display(),
                 meta.len()
             );
-            return BlockFile::open(path, BLOCK_SIZE)
-                .with_context(|| format!("failed to open target r/w {}", path.display()));
         } else {
             log::info!(
-                "target exists but size mismatch ({} vs expected {}), resizing...",
+                "opening existing target with size mismatch ({} vs expected {}), continuing...",
                 meta.len(),
                 expected_len
             );
         }
-    } else {
-        log::info!(
-            "creating target: {} ({} blocks, {} bytes)",
-            path.display(),
-            tl.total_blocks(),
-            expected_len,
-        );
+        return BlockFile::open(path, BLOCK_SIZE)
+            .with_context(|| format!("failed to open target r/w {}", path.display()));
     }
+
+    log::info!(
+        "creating target: {} ({} blocks, {} bytes)",
+        path.display(),
+        tl.total_blocks(),
+        expected_len,
+    );
 
     if let Some(parent) = path.parent() {
         if !parent.exists() {
@@ -198,7 +213,7 @@ fn open_or_create_target(path: &Path, tl: &TransferList) -> Result<BlockFile> {
     }
 
     BlockFile::create(path, tl.total_blocks(), BLOCK_SIZE)
-        .with_context(|| format!("failed to create or resize target {}", path.display()))
+        .with_context(|| format!("failed to create target {}", path.display()))
 }
 
 fn open_source(path: Option<&Path>) -> Result<Option<BlockFile>> {

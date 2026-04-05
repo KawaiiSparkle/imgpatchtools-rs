@@ -3,14 +3,200 @@ use crate::util::progress::ProgressReporter;
 use crate::util::rangeset::RangeSet;
 use anyhow::{ensure, Result};
 use std::fs::File;
-use std::io::Read;
+use std::io::{self, Read};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
 
+/// Buffer size for producer-consumer channel (1MB chunks).
+const CHANNEL_CHUNK_SIZE: usize = 1024 * 1024;
+
+/// Background thread decompressor for new data.
+/// Matches C++ pthread behavior: background thread decompresses while
+/// main thread writes to disk.
+pub struct ParallelNewDataReader {
+    receiver: Receiver<Vec<u8>>,
+    buffer: Vec<u8>,
+    buffer_pos: usize,
+    total_received: usize,
+}
+
+impl ParallelNewDataReader {
+    /// Open new data with background decompressor thread.
+    pub fn open(path: &std::path::Path) -> Result<Self> {
+        let path = path.to_path_buf();
+        
+        // Determine file type
+        let (file_path, ext) = match File::open(&path) {
+            Ok(_) => (path.clone(), path.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let br_path = std::path::PathBuf::from(format!("{}.br", path.display()));
+                let lzma_path = std::path::PathBuf::from(format!("{}.lzma", path.display()));
+                let xz_path = std::path::PathBuf::from(format!("{}.xz", path.display()));
+
+                if let Ok(_) = File::open(&br_path) {
+                    log::info!("auto-fallback to compressed new data: {}", br_path.display());
+                    (br_path, "br".to_string())
+                } else if let Ok(_) = File::open(&lzma_path) {
+                    log::info!("auto-fallback to compressed new data: {}", lzma_path.display());
+                    (lzma_path, "lzma".to_string())
+                } else if let Ok(_) = File::open(&xz_path) {
+                    log::info!("auto-fallback to compressed new data: {}", xz_path.display());
+                    (xz_path, "xz".to_string())
+                } else {
+                    return Err(e.into());
+                }
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        log::info!("starting background decompressor thread for: {}", file_path.display());
+
+        // Create channel for producer-consumer
+        let (sender, receiver) = mpsc::channel::<Vec<u8>>();
+
+        // Spawn background thread for decompression
+        thread::spawn(move || {
+            if let Err(e) = Self::decompressor_thread(file_path, ext, sender) {
+                log::error!("background decompressor thread failed: {}", e);
+            }
+        });
+
+        Ok(Self {
+            receiver,
+            buffer: Vec::new(),
+            buffer_pos: 0,
+            total_received: 0,
+        })
+    }
+
+    /// Background thread: decompress data and send through channel.
+    fn decompressor_thread(
+        path: std::path::PathBuf,
+        ext: String,
+        sender: Sender<Vec<u8>>,
+    ) -> Result<()> {
+        let file = File::open(&path)?;
+        
+        let mut reader: Box<dyn Read + Send> = match ext.as_str() {
+            "br" => {
+                log::info!("background: using Brotli decompressor");
+                Box::new(brotli::Decompressor::new(file, 65536))
+            }
+            "lzma" | "xz" => {
+                log::info!("background: using XZ/LZMA decompressor");
+                Box::new(xz2::read::XzDecoder::new(
+                    std::io::BufReader::with_capacity(65536, file),
+                ))
+            }
+            _ => {
+                log::info!("background: using raw file reader");
+                Box::new(file)
+            }
+        };
+
+        // Read and send chunks
+        loop {
+            let mut chunk = vec![0u8; CHANNEL_CHUNK_SIZE];
+            match reader.read(&mut chunk) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    chunk.truncate(n);
+                    if sender.send(chunk).is_err() {
+                        // Receiver dropped, exit thread
+                        break;
+                    }
+                }
+                Err(e) => {
+                    log::error!("background decompressor read error: {}", e);
+                    break;
+                }
+            }
+        }
+
+        log::debug!("background decompressor thread finished");
+        Ok(())
+    }
+
+    /// Fill internal buffer from channel.
+    fn refill_buffer(&mut self) -> Result<()> {
+        match self.receiver.recv() {
+            Ok(chunk) => {
+                self.total_received += chunk.len();
+                self.buffer = chunk;
+                self.buffer_pos = 0;
+                Ok(())
+            }
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "background decompressor channel closed"
+            ).into()),
+        }
+    }
+
+    /// Read exact number of bytes from background thread.
+    pub fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
+        let mut filled = 0;
+        
+        while filled < buf.len() {
+            // Refill if buffer empty
+            if self.buffer_pos >= self.buffer.len() {
+                self.refill_buffer()?;
+            }
+            
+            // Copy from internal buffer
+            let available = self.buffer.len() - self.buffer_pos;
+            let needed = buf.len() - filled;
+            let to_copy = available.min(needed);
+            
+            buf[filled..filled + to_copy].copy_from_slice(
+                &self.buffer[self.buffer_pos..self.buffer_pos + to_copy]
+            );
+            
+            self.buffer_pos += to_copy;
+            filled += to_copy;
+        }
+        
+        Ok(())
+    }
+
+    /// Read blocks with background decompression.
+    pub fn read_blocks(&mut self, count: u64, block_size: usize) -> Result<Vec<u8>> {
+        let len = (count as usize) * block_size;
+        let mut buf = vec![0u8; len];
+        self.read_exact(&mut buf)?;
+        Ok(buf)
+    }
+
+    /// Skip blocks (consume without returning).
+    pub fn skip_blocks(&mut self, count: u64, block_size: usize) -> Result<()> {
+        let mut len = (count as usize) * block_size;
+        let mut buf = vec![0u8; 65536.min(len)];
+        while len > 0 {
+            let to_read = len.min(buf.len());
+            self.read_exact(&mut buf[..to_read])?;
+            len -= to_read;
+        }
+        Ok(())
+    }
+
+    /// Get total bytes received so far.
+    pub fn bytes_received(&self) -> usize {
+        self.total_received
+    }
+}
+
+/// Legacy non-parallel reader for compatibility.
 pub struct NewDataReader {
     reader: Box<dyn Read>,
 }
 
 impl NewDataReader {
     pub fn open(path: &std::path::Path) -> Result<Self> {
+        // ParallelNewDataReader is the default, this fallback shouldn't be used
+        
         let (file, ext) = match File::open(path) {
             Ok(f) => {
                 let ext = path
@@ -142,7 +328,7 @@ pub struct CommandContext {
     pub target: BlockFile,
     pub source: Option<BlockFile>,
     pub stash: crate::core::blockimg::stash::StashManager,
-    pub new_data: NewDataReader,
+    pub new_data: ParallelNewDataReader,
     pub patch_data: PatchDataReader,
     pub written_blocks: u64,
     pub progress: Box<dyn ProgressReporter>,
@@ -157,7 +343,7 @@ impl CommandContext {
         target: BlockFile,
         source: Option<BlockFile>,
         stash: crate::core::blockimg::stash::StashManager,
-        new_data: NewDataReader,
+        new_data: ParallelNewDataReader,
         patch_data: PatchDataReader,
         progress: Box<dyn ProgressReporter>,
     ) -> Self {

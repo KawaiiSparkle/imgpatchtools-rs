@@ -31,13 +31,14 @@ pub fn run(
     patch_data: &str,
     target: &str,
 ) -> anyhow::Result<()> {
+    let stash_dir = std::env::temp_dir().join("imgpatchtools-stash");
     update::block_image_update(
         std::path::Path::new(target),
         std::path::Path::new(transfer_list),
         std::path::Path::new(new_data),
         std::path::Path::new(patch_data),
         None,
-        std::path::Path::new("/tmp/imgpatchtools-stash"),
+        &stash_dir,
         false,
         None,
     )

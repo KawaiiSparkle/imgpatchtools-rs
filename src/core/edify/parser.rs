@@ -295,7 +295,8 @@ impl<'a> Parser<'a> {
             Token::If => self.parse_if(),
             Token::LParen => {
                 self.bump()?;
-                let e = self.parse_expr()?;
+                // Parse statements (supports sequences like "(stmt1; stmt2)")
+                let e = self.parse_statements(&[Token::RParen])?;
                 self.expect(Token::RParen)?;
                 Ok(e)
             }
@@ -349,7 +350,10 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Parse an edify script, automatically skipping UTF-8 BOM if present.
 pub fn parse_edify(script: &str) -> Result<Expr> {
+    // Skip UTF-8 BOM (U+FEFF) if present.
+    let script = script.strip_prefix('\u{FEFF}').unwrap_or(script);
     let mut parser = Parser::new(script)?;
     parser.parse_script()
 }

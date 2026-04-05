@@ -12,10 +12,11 @@ pub mod cli;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
-use crate::core::edify::functions::{builtin_registry, run_script_offline};
+use crate::core::edify::functions::{builtin_registry, run_script_with_mode};
 use crate::core::super_img::cli::SuperArgs;
 use crate::core::super_img::op_list::DynamicPartitionState;
 
@@ -35,6 +36,81 @@ pub struct BatchConfig {
     pub excludes: Vec<String>,
     pub android_version: String,
     pub format: String,
+    pub verify: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Step timing tracker
+// ---------------------------------------------------------------------------
+
+/// Tracks timing for each processing step.
+#[derive(Debug, Default)]
+pub struct StepTimer {
+    steps: Vec<(String, Duration)>,
+    current: Option<(String, Instant)>,
+}
+
+impl StepTimer {
+    /// Create a new step timer.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Start timing a new step.
+    pub fn start(&mut self, name: impl Into<String>) {
+        self.current = Some((name.into(), Instant::now()));
+    }
+
+    /// End the current step and record its duration.
+    pub fn end(&mut self) {
+        if let Some((name, start)) = self.current.take() {
+            let duration = start.elapsed();
+            self.steps.push((name, duration));
+        }
+    }
+
+    /// Record a completed step with its duration.
+    pub fn record(&mut self, name: impl Into<String>, duration: Duration) {
+        self.steps.push((name.into(), duration));
+    }
+
+    /// Print all recorded timings.
+    pub fn print_summary(&self) {
+        if self.steps.is_empty() {
+            return;
+        }
+        let total: Duration = self.steps.iter().map(|(_, d)| *d).sum();
+
+        println!();
+        println!("╔══════════════════════════════════════════════════════╗");
+        println!("║          Step Timing Summary                         ║");
+        println!("╚══════════════════════════════════════════════════════╝");
+        println!();
+        for (name, duration) in &self.steps {
+            let pct = if total.as_secs() > 0 {
+                (duration.as_secs_f64() / total.as_secs_f64()) * 100.0
+            } else {
+                0.0
+            };
+            println!("  {:40} {:>10} ({:5.1}%)", name, format_duration(*duration), pct);
+        }
+        println!("  {:40} {:>10}", "─".repeat(40), "─".repeat(10));
+        println!("  {:40} {:>10}", "TOTAL", format_duration(total));
+        println!();
+    }
+}
+
+/// Format a duration in human-readable form.
+fn format_duration(d: Duration) -> String {
+    if d.as_secs() >= 3600 {
+        format!("{}h {:02}m {:02}s", d.as_secs() / 3600, (d.as_secs() % 3600) / 60, d.as_secs() % 60)
+    } else if d.as_secs() >= 60 {
+        format!("{}m {:02}s", d.as_secs() / 60, d.as_secs() % 60)
+    } else if d.as_secs() > 0 {
+        format!("{}.{:03}s", d.as_secs(), d.subsec_millis())
+    } else {
+        format!("{}ms", d.as_millis())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -186,8 +262,17 @@ fn print_dry_run(packages: &[OtaPackage], config: &BatchConfig) {
 
 fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
     let workdir = Path::new(&config.workdir);
+    let mut timer = StepTimer::new();
+    let batch_start = Instant::now();
 
-    // Create top-level workdir.
+    // Clean up any residual files from previous runs (Windows: ensure no leftovers)
+    if workdir.exists() {
+        log::info!("cleaning up residual workdir: {}", workdir.display());
+        fs::remove_dir_all(workdir)
+            .with_context(|| format!("failed to remove residual workdir {}", workdir.display()))?;
+    }
+
+    // Create fresh workdir.
     fs::create_dir_all(workdir).with_context(|| format!("create workdir {}", workdir.display()))?;
 
     println!();
@@ -219,57 +304,76 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
 
         // Step 1: Extract OTA zip.
         println!("  [1/4] Extracting...");
+        timer.start(format!("OTA #{} - Extract", pkg.index));
         extract_ota_zip(&pkg.path, &ota_dir)
             .with_context(|| format!("extract OTA #{} from {}", pkg.index, pkg.path.display()))?;
+        timer.end();
 
-        // Step 2: Copy source images from previous OTA (for incremental).
+        // Step 2: Move source images from previous OTA (for incremental).
         if let Some(ref prev) = prev_workdir {
             println!(
-                "  [2/4] Copying source images from OTA #{}...",
+                "  [2/4] Moving source images from OTA #{}...",
                 pkg.index - 1
             );
-            copy_source_images(prev, &ota_dir)?;
+            timer.start(format!("OTA #{} - Move sources", pkg.index));
+            move_source_images(prev, &ota_dir)?;
+            timer.end();
         } else {
-            println!("  [2/4] No previous OTA (full package), skipping copy.");
+            println!("  [2/4] No previous OTA (full package), skipping move.");
         }
 
         // Step 3: Save partitions that should be excluded at this step.
         let excluded = partitions_excluded_at(pkg.index, config);
         if !excluded.is_empty() {
             println!("  [3/4] Excluding partitions: {}", excluded.join(", "));
+            timer.start(format!("OTA #{} - Exclude partitions", pkg.index));
             save_and_exclude_partitions(&excluded, &ota_dir)?;
+            timer.end();
         } else {
             println!("  [3/4] No partitions excluded at this step.");
         }
 
         // Step 4: Run edify script.
         println!("  [4/4] Running edify script...");
+        timer.start(format!("OTA #{} - Edify script", pkg.index));
         let script_path = find_updater_script(&ota_dir)?;
 
         let script_content = fs::read_to_string(&script_path)
             .with_context(|| format!("read {}", script_path.display()))?;
 
-        // Pre-scan: check if script references .dat.br or .dat.lzma files.
-        let has_compressed_data =
-            script_content.contains(".dat.br") || script_content.contains(".dat.lzma");
-
-        let offline = has_compressed_data || !pkg.is_full;
         let registry = builtin_registry();
-        let result = run_script_offline(
+        let result = run_script_with_mode(
             &script_content,
             &registry,
             &ota_dir.to_string_lossy(),
-            offline,
+            config.verify,
         )
         .with_context(|| format!("edify execution for OTA #{}", pkg.index))?;
+        timer.end(); // End edify script timer
 
         // Restore excluded partitions.
         if !excluded.is_empty() {
+            timer.start(format!("OTA #{} - Restore excluded", pkg.index));
             restore_excluded_partitions(&excluded, &ota_dir)?;
+            timer.end();
         }
 
         // Run auto recovery patch (recovery-from-boot.p → recovery.img).
+        timer.start(format!("OTA #{} - Recovery patch", pkg.index));
         crate::core::edify::cli::auto_patch_recovery(&ota_dir.to_string_lossy());
+        timer.end();
+
+        // Delete updater script after successful execution.
+        if script_path.exists() {
+            fs::remove_file(&script_path)
+                .with_context(|| format!("delete updater script {}", script_path.display()))?;
+            log::info!("deleted updater script after successful execution: {}", script_path.display());
+        }
+
+        // Clean up workdir: keep only allowed files.
+        timer.start(format!("OTA #{} - Cleanup workdir", pkg.index));
+        cleanup_workdir(&ota_dir)?;
+        timer.end();
 
         // Track dynamic partitions.
         if let Some(ref dp) = result.dynamic_partitions {
@@ -281,28 +385,36 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
         println!();
     }
 
-    // Copy final images to output directory.
+    // Move final images to output directory.
     let final_workdir = prev_workdir.as_ref().context("no OTA packages processed")?;
     let output_dir = Path::new(&config.output_dir);
     fs::create_dir_all(output_dir)
         .with_context(|| format!("create output dir {}", output_dir.display()))?;
 
     println!("══════════════════════════════════════════════════════");
-    println!("  Copying final images to: {}", output_dir.display());
+    println!("  Moving final images to: {}", output_dir.display());
 
-    copy_final_images(final_workdir, output_dir)?;
+    timer.start("Move final images");
+    move_final_images(final_workdir, output_dir)?;
+    timer.end();
 
     // Build super.img if dynamic partitions were detected.
     if !config.no_super {
         if let Some(ref dp) = last_dp {
             println!();
             println!("  Dynamic partitions detected — building super.img...");
+            timer.start("Build super.img");
             build_super_from_batch(dp, final_workdir, output_dir, config)?;
+            timer.end();
         } else {
             println!();
             println!("  No dynamic partitions detected — skipping super.img build.");
         }
     }
+
+    // Record total batch time.
+    let total_time = batch_start.elapsed();
+    timer.record("Total batch time", total_time);
 
     println!();
     println!("╔══════════════════════════════════════════════════════╗");
@@ -313,6 +425,19 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
 
     // List output files.
     list_output_files(output_dir);
+
+    // Print timing summary.
+    timer.print_summary();
+
+    // Clean up workdir after successful completion.
+    if workdir.exists() {
+        log::info!("cleaning up workdir after successful batch: {}", workdir.display());
+        if let Err(e) = fs::remove_dir_all(workdir) {
+            log::warn!("failed to clean up workdir: {}", e);
+        } else {
+            println!("  Cleaned up workdir: {}", workdir.display());
+        }
+    }
 
     Ok(())
 }
@@ -355,26 +480,113 @@ fn extract_ota_zip(zip_path: &Path, dest_dir: &Path) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Source image copying (for incremental OTAs)
+// Source image moving (for incremental OTAs) - moves .img files instead of copying
+// to save disk space (original OTA zips are preserved)
 // ---------------------------------------------------------------------------
 
-fn copy_source_images(prev_dir: &Path, ota_dir: &Path) -> Result<()> {
+fn move_source_images(prev_dir: &Path, ota_dir: &Path) -> Result<()> {
     for entry in fs::read_dir(prev_dir).context("read previous workdir")? {
         let entry = entry.context("read dir entry")?;
         let path = entry.path();
         if !path.is_file() {
             continue;
         }
-        // Only copy .img files.
+        // Only move .img files.
         if path.extension().and_then(|e| e.to_str()) == Some("img") {
             let dest = ota_dir.join(entry.file_name());
-            if !dest.exists() {
-                fs::copy(&path, &dest)
-                    .with_context(|| format!("copy {} → {}", path.display(), dest.display()))?;
-                log::info!("copied source: {} → {}", path.display(), dest.display());
+            // Remove destination if exists, then move.
+            if dest.exists() {
+                fs::remove_file(&dest)
+                    .with_context(|| format!("remove existing {}", dest.display()))?;
+            }
+            fs::rename(&path, &dest)
+                .with_context(|| format!("move {} → {}", path.display(), dest.display()))?;
+            log::info!("moved source: {} → {}", path.display(), dest.display());
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Workdir cleanup - keep only essential files
+// ---------------------------------------------------------------------------
+
+/// Clean up workdir after edify execution.
+/// Keeps only: *.*.dat.*, *.transfer.list, *.img, boot.img.p, boot.img, update-script
+/// Note: *.img files are kept for incremental OTA chaining (will be moved to next OTA)
+fn cleanup_workdir(ota_dir: &Path) -> Result<()> {
+    // Allowed file patterns:
+    // - *.*.dat.* (system.new.dat.br, etc.)
+    // - *.transfer.list
+    // - boot.img.p
+    // - boot.img
+    // - update-script
+
+    fn is_allowed_file(filename: &str) -> bool {
+        // Check for *.*.dat.* pattern (e.g., system.new.dat.br)
+        if filename.contains(".dat.") {
+            return true;
+        }
+        // Check for *.transfer.list
+        if filename.ends_with(".transfer.list") {
+            return true;
+        }
+        // Check for *.img files (needed for incremental OTA chaining)
+        if filename.ends_with(".img") {
+            return true;
+        }
+        // Check for specific files
+        if filename == "boot.img.p" || filename == "boot.img" || filename == "update-script" {
+            return true;
+        }
+        false
+    }
+
+    // Collect files to delete
+    let mut files_to_delete: Vec<PathBuf> = Vec::new();
+    let mut dirs_to_delete: Vec<PathBuf> = Vec::new();
+
+    for entry in fs::read_dir(ota_dir).context("read ota_dir for cleanup")? {
+        let entry = entry.context("read dir entry")?;
+        let path = entry.path();
+        
+        if path.is_file() {
+            let filename = entry.file_name();
+            let filename_str = filename.to_string_lossy();
+            
+            if !is_allowed_file(&filename_str) {
+                files_to_delete.push(path);
+            }
+        } else if path.is_dir() {
+            // Mark directories for deletion (except hidden backup dir)
+            let dirname = entry.file_name();
+            let dirname_str = dirname.to_string_lossy();
+            
+            if dirname_str != ".batch_backup" {
+                dirs_to_delete.push(path);
             }
         }
     }
+
+    // Delete files
+    for path in files_to_delete {
+        if let Err(e) = fs::remove_file(&path) {
+            log::warn!("cleanup: failed to delete file {}: {}", path.display(), e);
+        } else {
+            log::debug!("cleanup: deleted file {}", path.display());
+        }
+    }
+
+    // Delete directories recursively
+    for path in dirs_to_delete {
+        if let Err(e) = fs::remove_dir_all(&path) {
+            log::warn!("cleanup: failed to delete directory {}: {}", path.display(), e);
+        } else {
+            log::debug!("cleanup: deleted directory {}", path.display());
+        }
+    }
+
+    log::info!("cleanup: workdir cleaned, only essential files retained");
     Ok(())
 }
 
@@ -629,7 +841,7 @@ fn extract_partition_names(script: &str) -> Vec<String> {
 // Final image output
 // ---------------------------------------------------------------------------
 
-fn copy_final_images(workdir: &Path, output_dir: &Path) -> Result<()> {
+fn move_final_images(workdir: &Path, output_dir: &Path) -> Result<()> {
     for entry in fs::read_dir(workdir).context("read final workdir")? {
         let entry = entry.context("read dir entry")?;
         let path = entry.path();
@@ -639,14 +851,15 @@ fn copy_final_images(workdir: &Path, output_dir: &Path) -> Result<()> {
         if let Some(ext) = path.extension() {
             if ext == "img" {
                 let dest = output_dir.join(entry.file_name());
-                // Copy only if newer or doesn't exist.
-                if !dest.exists() {
-                    fs::copy(&path, &dest)
-                        .with_context(|| format!("copy {} → {}", path.display(), dest.display()))?;
-                    log::info!("output: {}", dest.display());
-                } else {
-                    log::info!("skip (exists): {}", dest.display());
+                // Remove destination if exists, then move (overwrite).
+                if dest.exists() {
+                    fs::remove_file(&dest)
+                        .with_context(|| format!("remove existing {}", dest.display()))?;
+                    log::info!("overwriting: {}", dest.display());
                 }
+                fs::rename(&path, &dest)
+                    .with_context(|| format!("move {} → {}", path.display(), dest.display()))?;
+                log::info!("output: {}", dest.display());
             }
         }
     }

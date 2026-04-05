@@ -29,7 +29,7 @@ pub fn cmd_stash(ctx: &mut CommandContext, cmd: &TransferCommand) -> Result<()> 
         // but typically we want it to match if the ID is a hash.
     }
 
-    ctx.stash.save(id, &data)?;
+    ctx.stash.save(id, data.as_ref())?;
     Ok(())
 }
 

@@ -63,6 +63,11 @@ pub struct BatchArgs {
     /// Super.img output format: "sparse" or "raw".
     #[arg(long, default_value = "sparse")]
     pub format: String,
+
+    /// Verify mode: execute all commands including block_image_verify and assertions.
+    /// Without this flag, only apply_patch, block_image_update and abort are executed.
+    #[arg(long)]
+    pub verify: bool,
 }
 
 /// Execute the `batch` subcommand.
@@ -121,6 +126,7 @@ pub fn run(args: &BatchArgs) -> Result<()> {
         excludes,
         android_version: args.android_version.clone(),
         format: args.format.clone(),
+        verify: args.verify,
     };
 
     run_batch_internal(&args.full_ota, &args.inc_otas, &config)
