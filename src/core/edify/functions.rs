@@ -108,6 +108,12 @@ pub struct FunctionRegistry {
     map: HashMap<String, BuiltinFn>,
 }
 
+impl Default for FunctionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FunctionRegistry {
     pub fn new() -> Self {
         Self {
@@ -301,7 +307,11 @@ fn fn_package_extract_file(ctx: &mut FunctionContext, args: &[Value]) -> Result<
         // Source file already extracted - need to copy from the first target
         if first_target == &partition_name {
             // Same target, skip
-            log::debug!("package_extract_file: {} already extracted to {}, skipping", src_filename, partition_name);
+            log::debug!(
+                "package_extract_file: {} already extracted to {}, skipping",
+                src_filename,
+                partition_name
+            );
             return Ok(Value::String("t".into()));
         }
         // Different target - copy from the first extracted location
@@ -315,13 +325,13 @@ fn fn_package_extract_file(ctx: &mut FunctionContext, args: &[Value]) -> Result<
         } else {
             ctx.resolve_package_path(src)
         };
-        
+
         // Skip if source and destination are the same file
         if sp == dp {
             log::debug!("package_extract_file: source and destination are the same, skipping");
             return Ok(Value::String("t".into()));
         }
-        
+
         (sp, "rename")
     };
 
@@ -333,13 +343,26 @@ fn fn_package_extract_file(ctx: &mut FunctionContext, args: &[Value]) -> Result<
 
     if operation == "rename" {
         // First extraction: rename the file
-        log::info!("package_extract_file: renaming {} → {} (partition: {})", sp.display(), dp.display(), partition_name);
-        std::fs::rename(&sp, &dp).with_context(|| format!("rename {} → {}", sp.display(), dp.display()))?;
-        ctx.extracted_files.insert(src_filename.clone(), partition_name.clone());
+        log::info!(
+            "package_extract_file: renaming {} → {} (partition: {})",
+            sp.display(),
+            dp.display(),
+            partition_name
+        );
+        std::fs::rename(&sp, &dp)
+            .with_context(|| format!("rename {} → {}", sp.display(), dp.display()))?;
+        ctx.extracted_files
+            .insert(src_filename.clone(), partition_name.clone());
     } else {
         // Subsequent extraction: copy from the first extracted location
-        log::info!("package_extract_file: copying {} → {} (partition: {})", sp.display(), dp.display(), partition_name);
-        std::fs::copy(&sp, &dp).with_context(|| format!("copy {} → {}", sp.display(), dp.display()))?;
+        log::info!(
+            "package_extract_file: copying {} → {} (partition: {})",
+            sp.display(),
+            dp.display(),
+            partition_name
+        );
+        std::fs::copy(&sp, &dp)
+            .with_context(|| format!("copy {} → {}", sp.display(), dp.display()))?;
     }
 
     Ok(Value::String("t".into()))
@@ -465,7 +488,7 @@ fn parse_sha1_patch_pairs(ctx: &FunctionContext, tail: &[Value]) -> Result<Vec<(
         bail!("missing sha1:patch args");
     }
     let paired = tail.len() >= 2
-        && tail.len() % 2 == 0
+        && tail.len().is_multiple_of(2)
         && !(tail[1].as_str().len() == 40
             && tail[1].as_str().bytes().all(|b| b.is_ascii_hexdigit()));
     if paired {
@@ -774,7 +797,7 @@ fn fn_not_equal(_ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
 }
 
 fn fn_not(_ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
-    let truthy = args.first().map_or(false, |a| a.is_truthy());
+    let truthy = args.first().is_some_and(|a| a.is_truthy());
     Ok(Value::String(if truthy {
         String::new()
     } else {
@@ -1041,13 +1064,22 @@ fn eval(expr: &Expr, ctx: &mut FunctionContext, reg: &FunctionRegistry) -> Resul
             }
             // Skip mode: allow ui_print, block_image_update, and package_extract_file
             // (package_extract_file is needed by block_image_update to resolve paths)
-            if ctx.skip_mode && name != "ui_print" && name != "block_image_update" && name != "package_extract_file" {
+            if ctx.skip_mode
+                && name != "ui_print"
+                && name != "block_image_update"
+                && name != "package_extract_file"
+            {
                 log::debug!("edify: skip_mode skipping function '{}'", name);
                 return Ok(Value::String(String::new()));
             }
             // Fast mode: only execute apply_patch, block_image_update, abort and package_extract_file
             // (package_extract_file is needed by block_image_update to resolve file paths)
-            if ctx.fast_mode && name != "apply_patch" && name != "block_image_update" && name != "abort" && name != "package_extract_file" {
+            if ctx.fast_mode
+                && name != "apply_patch"
+                && name != "block_image_update"
+                && name != "abort"
+                && name != "package_extract_file"
+            {
                 log::debug!("edify: fast_mode skipping function '{}'", name);
                 return Ok(Value::String(String::new()));
             }

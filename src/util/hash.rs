@@ -264,5 +264,3 @@ fn checked_block_offset(block: u64, block_size: usize) -> Result<usize> {
     let byte_offset = block.checked_mul(bs).context("block offset overflow")?;
     usize::try_from(byte_offset).context("block offset exceeds addressable range")
 }
-
-

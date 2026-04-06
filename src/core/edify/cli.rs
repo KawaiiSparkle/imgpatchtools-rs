@@ -130,8 +130,8 @@ pub(crate) fn auto_patch_recovery(workdir: &str) {
             let tokens: Vec<&str> = line.split_whitespace().collect();
             for (i, tok) in tokens.iter().enumerate() {
                 // Heuristic: target_sha1 is exactly 40 hex chars, target_size follows it
-                if tok.len() == 40 && tok.chars().all(|c| c.is_ascii_hexdigit()) {
-                    if i + 1 < tokens.len() {
+                if tok.len() == 40 && tok.chars().all(|c| c.is_ascii_hexdigit())
+                    && i + 1 < tokens.len() {
                         if let Ok(sz) = tokens[i + 1].parse::<u64>() {
                             target_sha1 = tok.to_string();
                             target_size = sz;
@@ -139,7 +139,6 @@ pub(crate) fn auto_patch_recovery(workdir: &str) {
                             break;
                         }
                     }
-                }
             }
         }
         if found {

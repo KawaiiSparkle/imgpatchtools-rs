@@ -157,7 +157,9 @@ fn print_full_usage() {
     println!("  Apply a block-based OTA update to a target image.");
     println!("  OPTIONS:");
     println!("    --source <PATH>        Source image for incremental updates");
-    println!("    --stash-dir <DIR>      Stash directory (default: <system_temp>/imgpatchtools-stash)");
+    println!(
+        "    --stash-dir <DIR>      Stash directory (default: <system_temp>/imgpatchtools-stash)"
+    );
     println!("    --resume-file <PATH>   Resume from checkpoint");
     println!();
     println!("blockimg verify <target> <transfer_list>");

@@ -127,7 +127,7 @@ fn parse_header(lines: &[&str]) -> Result<TransferListHeader> {
         .parse()
         .with_context(|| format!("bad version: {:?}", lines[0]))?;
     ensure!(
-        version >= MIN_VERSION && version <= MAX_VERSION,
+        (MIN_VERSION..=MAX_VERSION).contains(&version),
         "unsupported transfer-list version {version} (expected {MIN_VERSION}–{MAX_VERSION})"
     );
 

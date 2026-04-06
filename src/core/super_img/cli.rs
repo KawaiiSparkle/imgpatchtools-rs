@@ -723,7 +723,7 @@ pub fn run_lpunpack(args: &LpunpackArgs) -> Result<()> {
     let mut extracted = Vec::new();
     let mut skipped = Vec::new();
 
-    for (_i, p) in metadata.partitions.iter().enumerate() {
+    for p in metadata.partitions.iter() {
         let name = p.name_str();
 
         // Apply partition filter.

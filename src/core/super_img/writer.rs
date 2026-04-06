@@ -132,7 +132,7 @@ pub fn write_super_image(
         let mut reader = BufReader::with_capacity(1 << 20, src_file);
         let mut img_off: u64 = 0;
 
-        pb.set_prefix(format!("{}", part_name));
+        pb.set_prefix(part_name.to_string());
 
         for i in 0..part.num_extents {
             let ext = &metadata.extents[(part.first_extent_index + i) as usize];

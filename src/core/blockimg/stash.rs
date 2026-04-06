@@ -22,6 +22,7 @@ use std::sync::Arc;
 use anyhow::{bail, ensure, Context, Result};
 
 use crate::util::hash;
+use crate::util::rangeset::RangeSet;
 
 // ---------------------------------------------------------------------------
 // StashManager
@@ -58,7 +59,7 @@ impl StashManager {
     ///
     /// # Arguments
     ///
-    /// * `work_dir`    — directory for stash file storage.
+    /// * `work_dir`    — directory for stash file Storage.
     /// * `block_size`  — block size in bytes (typically 4096).
     /// * `max_entries` — max simultaneous stash slots (from transfer-list
     ///   header; 0 means unlimited).
@@ -161,7 +162,7 @@ impl StashManager {
 
         // Size sanity: must be a whole number of blocks.
         ensure!(
-            data.len() % self.block_size == 0,
+            data.len().is_multiple_of(self.block_size),
             "stash data length {} is not a multiple of block_size {}",
             data.len(),
             self.block_size
@@ -217,7 +218,7 @@ impl StashManager {
     /// its SHA-1 does not match.
     pub fn load(&mut self, id: &str) -> Result<Arc<[u8]>> {
         let path = self.stash_path(id);
-        
+
         // Always read from disk (no in-memory cache).
         // NOTE: We don't require metadata to exist - file might exist from prior run
         let data = fs::read(&path)
@@ -238,6 +239,71 @@ impl StashManager {
 
         // Return data without caching (Arc for API compatibility).
         Ok(Arc::from(data))
+    }
+
+    /// Load only specific byte ranges from a stash file (方案6).
+    ///
+    /// Instead of reading the entire stash file into memory, calculates the
+    /// byte offset for each mapped range and reads only those portions.
+    /// This can dramatically reduce memory usage when a stash file is large
+    /// but only a subset of its blocks are referenced.
+    ///
+    /// The `map_ranges` defines which blocks are needed and their order.
+    /// Stash data is stored sequentially, so we compute cumulative offsets.
+    ///
+    /// Returns a contiguous buffer containing only the requested data,
+    /// in the same order as `map_ranges`.
+    pub fn load_ranges(
+        &mut self,
+        id: &str,
+        map_ranges: &RangeSet,
+        block_size: usize,
+    ) -> Result<Vec<u8>> {
+        let path = self.stash_path(id);
+        let mut file = std::fs::File::open(&path)
+            .with_context(|| format!("stash load_ranges: failed to open {}", path.display()))?;
+
+        // Calculate total bytes needed
+        let total_blocks = map_ranges.blocks();
+        let total_bytes = (total_blocks as usize) * block_size;
+        let mut result = vec![0u8; total_bytes];
+        let mut result_offset = 0usize;
+        let mut file_offset: u64 = 0;
+
+        for (start, end) in map_ranges.iter() {
+            let len = ((end - start) as usize) * block_size;
+
+            use std::io::{Read, Seek, SeekFrom};
+            file.seek(SeekFrom::Start(file_offset))?;
+            file.read_exact(&mut result[result_offset..result_offset + len])
+                .with_context(|| {
+                    format!(
+                        "stash load_ranges: failed to read {} bytes at offset {}",
+                        len, file_offset
+                    )
+                })?;
+
+            result_offset += len;
+            file_offset += len as u64;
+        }
+
+        log::debug!(
+            "stash load_ranges: {} ({} bytes / {} blocks from disk, file offset ended at {})",
+            id,
+            total_bytes,
+            total_blocks,
+            file_offset
+        );
+
+        // Update metadata if not present (for resume support)
+        if !self.entries.contains_key(id) {
+            let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+            let blocks = file_len / block_size as u64;
+            self.entries.insert(id.to_string(), blocks);
+            self.current_blocks += blocks;
+        }
+
+        Ok(result)
     }
 
     /// Load data from a stash slot without cloning — returns an Arc.

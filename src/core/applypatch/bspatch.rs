@@ -55,7 +55,7 @@ pub fn apply_bspatch(source: &[u8], patch: &[u8]) -> Result<Vec<u8>> {
 ///    c. Adjust source pointer by `seek_adj`
 pub fn apply_bspatch_at(source: &[u8], patch: &[u8], patch_offset: usize) -> Result<Vec<u8>> {
     let header = parse_header(patch, patch_offset)?;
-    
+
     let payload = &patch[patch_offset + HEADER_SIZE..];
     let ctrl_compressed = &payload[..header.ctrl_len];
     let diff_compressed = &payload[header.ctrl_len..header.ctrl_len + header.diff_len];
@@ -154,7 +154,7 @@ fn apply_patch_stream(
 
     // Cursor positions.
     let mut new_pos: usize = 0; // position in output
-    let mut old_pos: i64 = 0;   // position in source (signed — may go negative)
+    let mut old_pos: i64 = 0; // position in source (signed — may go negative)
     let mut ctrl_buf = [0u8; 24];
 
     while new_pos < new_size {
@@ -168,7 +168,10 @@ fn apply_patch_stream(
         let seek_adj = offtin(&ctrl_buf[16..24]);
 
         ensure!(add_len >= 0, "negative add_len in control tuple: {add_len}");
-        ensure!(copy_len >= 0, "negative copy_len in control tuple: {copy_len}");
+        ensure!(
+            copy_len >= 0,
+            "negative copy_len in control tuple: {copy_len}"
+        );
         let add_len = add_len as usize;
         let copy_len = copy_len as usize;
 

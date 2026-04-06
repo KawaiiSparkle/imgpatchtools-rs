@@ -15,6 +15,12 @@ pub struct CommandRegistry {
     map: HashMap<&'static str, CommandFn>,
 }
 
+impl Default for CommandRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CommandRegistry {
     pub fn new() -> Self {
         Self {
@@ -98,11 +104,17 @@ pub fn execute_transfer_list(
         // These commands are unnecessary for full OTAs and produce the same result
         if is_full_ota {
             match cmd.cmd_type {
-                crate::core::blockimg::transfer_list::CommandType::Erase |
-                crate::core::blockimg::transfer_list::CommandType::Zero => {
-                    log::debug!("skipping {} command in full OTA mode", cmd.cmd_type.as_str());
+                crate::core::blockimg::transfer_list::CommandType::Erase
+                | crate::core::blockimg::transfer_list::CommandType::Zero => {
+                    log::debug!(
+                        "skipping {} command in full OTA mode",
+                        cmd.cmd_type.as_str()
+                    );
                     // Still advance progress as if we processed it
-                    let processed = cmd.target_ranges.as_ref().map_or(0, |r: &RangeSet| r.blocks());
+                    let processed = cmd
+                        .target_ranges
+                        .as_ref()
+                        .map_or(0, |r: &RangeSet| r.blocks());
                     if processed > 0 {
                         ctx.progress.advance(processed);
                     }

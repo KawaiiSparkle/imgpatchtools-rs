@@ -13,6 +13,15 @@
 //!
 //! The factory function [`new_progress`] selects the appropriate
 //! implementation based on a `verbose` flag.
+//!
+//! # Throttling (方案9)
+//!
+//! [`ConsoleProgress`] batches `advance()` calls and only updates the
+//! underlying indicatif bar every ~100 ms. This dramatically reduces
+//! terminal I/O overhead during tight inner loops (e.g. zero-fill of
+//! millions of blocks) without visible lag.
+
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -44,7 +53,7 @@ pub trait ProgressReporter: Send {
 }
 
 // ---------------------------------------------------------------------------
-// ConsoleProgress
+// ConsoleProgress (with throttling)
 // ---------------------------------------------------------------------------
 
 /// Progress bar template used for block-based operations.
@@ -56,13 +65,22 @@ const BAR_TEMPLATE: &str = "{prefix:>12.cyan.bold} [{bar:40.green/dark_gray}] \
 /// Progress bar characters: filled, current, empty.
 const BAR_CHARS: &str = "█▓░";
 
+/// Minimum interval between progress bar redraws (100 ms).
+/// Reduces terminal I/O overhead from potentially millions of advance() calls
+/// down to ~10 redraws per second.
+const THROTTLE_INTERVAL_MS: u64 = 100;
+
 /// A progress reporter that renders a live progress bar to stderr using
-/// [`indicatif`].
+/// [`indicatif`], with time-based throttling to reduce I/O overhead.
 ///
 /// Displays: stage prefix, animated bar, position / total, percentage,
 /// throughput (blocks/s), and estimated time remaining.
 pub struct ConsoleProgress {
     bar: ProgressBar,
+    /// Accumulated pending blocks since last flush.
+    pending: u64,
+    /// Timestamp of the last bar update.
+    last_flush: Instant,
 }
 
 impl ConsoleProgress {
@@ -82,24 +100,54 @@ impl ConsoleProgress {
             .context("invalid progress bar template")?
             .progress_chars(BAR_CHARS);
         bar.set_style(style);
-        Ok(Self { bar })
+        Ok(Self {
+            bar,
+            pending: 0,
+            last_flush: Instant::now(),
+        })
+    }
+
+    /// Flush pending progress to the indicatif bar if enough time has elapsed.
+    #[inline]
+    fn maybe_flush(&mut self) {
+        let now = Instant::now();
+        let elapsed_ms = now.duration_since(self.last_flush).as_millis() as u64;
+        if elapsed_ms >= THROTTLE_INTERVAL_MS {
+            self.bar.inc(self.pending);
+            self.pending = 0;
+            self.last_flush = now;
+        }
+    }
+
+    /// Force-flush any remaining pending progress.
+    #[inline]
+    fn force_flush(&mut self) {
+        if self.pending > 0 {
+            self.bar.inc(self.pending);
+            self.pending = 0;
+            self.last_flush = Instant::now();
+        }
     }
 }
 
 impl ProgressReporter for ConsoleProgress {
     fn set_total(&mut self, total: u64) {
+        self.force_flush();
         self.bar.set_length(total);
     }
 
     fn advance(&mut self, delta: u64) {
-        self.bar.inc(delta);
+        self.pending += delta;
+        self.maybe_flush();
     }
 
     fn set_stage(&mut self, msg: &str) {
+        self.force_flush();
         self.bar.set_prefix(msg.to_string());
     }
 
     fn finish(&mut self) {
+        self.force_flush();
         self.bar.finish_and_clear();
     }
 }

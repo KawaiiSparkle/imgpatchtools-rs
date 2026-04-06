@@ -13,6 +13,11 @@ use std::sync::OnceLock;
 /// Reusable zero-fill chunk size (64 MiB - maximize throughput).
 const ZERO_BUF_SIZE: usize = 64 * 1024 * 1024;
 
+/// Buffered I/O buffer size for non-mmap reads/writes (256 KiB).
+/// Larger than OS default (4-8 KiB) to reduce syscall overhead on
+/// constrained hardware (i5-3470s, SATA SSD).
+const BUF_IO_SIZE: usize = 256 * 1024;
+
 /// Global zero buffer - allocate once, reuse forever.
 static ZERO_BUFFER: OnceLock<Vec<u8>> = OnceLock::new();
 
@@ -21,7 +26,10 @@ fn get_zero_buffer() -> &'static [u8] {
 }
 
 /// Threshold for using mmap: files larger than this use mmap for reads.
-const MMAP_THRESHOLD: u64 = 256 * 1024 * 1024; // 256 MB
+/// Set to 16 MB to avoid virtual memory pressure on constrained systems
+/// (1.8 GB available RAM). Large files (10+ GB source images) are better
+/// served by explicit buffered I/O with large buffers.
+const MMAP_THRESHOLD: u64 = 16 * 1024 * 1024; // 16 MB
 
 // ---------------------------------------------------------------------------
 // BlockFile
@@ -56,8 +64,11 @@ impl BlockFile {
             .open(path)
             .with_context(|| format!("failed to open block file: {}", path.display()))?;
 
+        #[cfg(target_os = "windows")]
+        crate::util::platform::set_sequential_hint(&file);
+
         let file_len = file.metadata()?.len();
-        
+
         // Use mmap for large files to reduce syscall overhead
         let mmap = if file_len >= MMAP_THRESHOLD {
             unsafe {
@@ -151,12 +162,12 @@ impl BlockFile {
                 buffer_offset += read_len;
             }
         } else {
-            // Fall back to buffered I/O for small files
-            let mut f = &self.file;
+            // Fall back to buffered I/O with large buffer to reduce syscall overhead
+            let mut f = std::io::BufReader::with_capacity(BUF_IO_SIZE, &self.file);
             for (start, end) in ranges.iter() {
                 let num_blocks = end - start;
                 let read_len = (num_blocks as usize) * self.block_size;
-                let file_offset = (start as u64) * (self.block_size as u64);
+                let file_offset = start * (self.block_size as u64);
 
                 ensure!(
                     file_offset + read_len as u64 <= self.file_len,
@@ -169,7 +180,9 @@ impl BlockFile {
                 f.seek(SeekFrom::Start(file_offset))
                     .with_context(|| format!("seek to {} for read", file_offset))?;
                 f.read_exact(&mut buffer[buffer_offset..buffer_offset + read_len])
-                    .with_context(|| format!("read {} bytes at offset {}", read_len, file_offset))?;
+                    .with_context(|| {
+                        format!("read {} bytes at offset {}", read_len, file_offset)
+                    })?;
 
                 buffer_offset += read_len;
             }
@@ -185,7 +198,7 @@ impl BlockFile {
         let mut buf = vec![0u8; ZERO_BUF_SIZE]; // Use 8 MiB stream buffer
         let mut f = &self.file;
         for (start, end) in ranges.iter() {
-            let file_offset = (start as u64) * (self.block_size as u64);
+            let file_offset = start * (self.block_size as u64);
             let mut total_len = ((end - start) as usize) * self.block_size;
 
             f.seek(SeekFrom::Start(file_offset))?;
@@ -214,7 +227,7 @@ impl BlockFile {
         for (start, end) in ranges.iter() {
             let num_blocks = end - start;
             let write_len = (num_blocks as usize) * self.block_size;
-            let file_offset = (start as u64) * (self.block_size as u64);
+            let file_offset = start * (self.block_size as u64);
 
             ensure!(
                 file_offset + write_len as u64 <= self.file_len,
@@ -248,7 +261,7 @@ impl BlockFile {
     {
         let mut max_needed: u64 = self.file_len;
         for (_start, end) in ranges.iter() {
-            let range_end = (end as u64) * (self.block_size as u64);
+            let range_end = end * (self.block_size as u64);
             if range_end > max_needed {
                 max_needed = range_end;
             }
@@ -259,7 +272,7 @@ impl BlockFile {
 
         let mut buf = vec![0u8; ZERO_BUF_SIZE];
         for (start, end) in ranges.iter() {
-            let file_offset = (start as u64) * (self.block_size as u64);
+            let file_offset = start * (self.block_size as u64);
             let mut total_len = ((end - start) as usize) * self.block_size;
 
             self.file.seek(SeekFrom::Start(file_offset))?;
@@ -270,7 +283,7 @@ impl BlockFile {
                 self.file.write_all(&buf[..chunk])?;
                 total_len -= chunk;
 
-                if chunk % self.block_size == 0 {
+                if chunk.is_multiple_of(self.block_size) {
                     progress_cb((chunk / self.block_size) as u64);
                 }
             }
@@ -292,7 +305,7 @@ impl BlockFile {
     {
         let mut max_needed: u64 = self.file_len;
         for (_start, end) in ranges.iter() {
-            let range_end = (end as u64) * (self.block_size as u64);
+            let range_end = end * (self.block_size as u64);
             if range_end > max_needed {
                 max_needed = range_end;
             }
@@ -303,7 +316,7 @@ impl BlockFile {
 
         let mut buf = vec![0u8; ZERO_BUF_SIZE];
         for (start, end) in ranges.iter() {
-            let file_offset = (start as u64) * (self.block_size as u64);
+            let file_offset = start * (self.block_size as u64);
             let mut total_len = ((end - start) as usize) * self.block_size;
 
             self.file.seek(SeekFrom::Start(file_offset))?;
@@ -314,7 +327,7 @@ impl BlockFile {
                 self.file.write_all(&buf[..chunk])?;
                 total_len -= chunk;
 
-                if chunk % self.block_size == 0 {
+                if chunk.is_multiple_of(self.block_size) {
                     progress_cb((chunk / self.block_size) as u64);
                 }
             }
@@ -326,7 +339,7 @@ impl BlockFile {
     pub fn copy_ranges(&mut self, ranges: &RangeSet, src: &BlockFile) -> Result<()> {
         let mut max_needed: u64 = self.file_len;
         for (_start, end) in ranges.iter() {
-            let range_end = (end as u64) * (self.block_size as u64);
+            let range_end = end * (self.block_size as u64);
             if range_end > max_needed {
                 max_needed = range_end;
             }
@@ -342,7 +355,8 @@ impl BlockFile {
                 let total_len = ((end - start) as usize) * src.block_size;
 
                 self.file.seek(SeekFrom::Start(file_offset as u64))?;
-                self.file.write_all(&src_mmap[file_offset..file_offset + total_len])?;
+                self.file
+                    .write_all(&src_mmap[file_offset..file_offset + total_len])?;
             }
         } else {
             // Use large buffer for maximum throughput
@@ -350,7 +364,7 @@ impl BlockFile {
             let mut src_f = &src.file;
 
             for (start, end) in ranges.iter() {
-                let file_offset = (start as u64) * (self.block_size as u64);
+                let file_offset = start * (self.block_size as u64);
                 let mut total_len = ((end - start) as usize) * self.block_size;
 
                 self.file.seek(SeekFrom::Start(file_offset))?;
@@ -372,6 +386,10 @@ impl BlockFile {
     }
 
     /// Fill a set of block ranges with zeroes, providing live progress updates.
+    ///
+    /// On Windows (方案5), attempts to use `FSCTL_SET_SPARSE` + `FSCTL_SET_ZERO_DATA`
+    /// for each range, which de-allocates disk blocks instead of writing zeroes.
+    /// Falls back to write-zero if the sparse API is unavailable.
     pub fn zero_ranges_with_progress<F>(
         &mut self,
         ranges: &RangeSet,
@@ -382,7 +400,7 @@ impl BlockFile {
     {
         let mut max_needed: u64 = self.file_len;
         for (_start, end) in ranges.iter() {
-            let range_end = (end as u64) * (self.block_size as u64);
+            let range_end = end * (self.block_size as u64);
             if range_end > max_needed {
                 max_needed = range_end;
             }
@@ -391,10 +409,52 @@ impl BlockFile {
             self.ensure_size(max_needed)?;
         }
 
+        // 方案5: Try Windows sparse file API first
+        #[cfg(target_os = "windows")]
+        {
+            let _ = crate::util::platform::set_sparse(&self.file);
+            let mut use_sparse = true;
+
+            for (start, end) in ranges.iter() {
+                let file_offset = (start as u64) * (self.block_size as u64);
+                let byte_len = ((end - start) as u64) * (self.block_size as u64);
+
+                if use_sparse {
+                    match crate::util::platform::zero_data(&self.file, file_offset, byte_len) {
+                        Ok(()) => {
+                            let blocks = end - start;
+                            progress_cb(blocks);
+                            continue;
+                        }
+                        Err(_) => {
+                            log::debug!("sparse zero failed, falling back to write-zero");
+                            use_sparse = false;
+                            // fall through to write-zero path
+                        }
+                    }
+                }
+
+                // Fallback: write zeroes
+                let zeros = get_zero_buffer();
+                let mut remaining = byte_len as usize;
+                self.file.seek(SeekFrom::Start(file_offset))?;
+                while remaining > 0 {
+                    let chunk = remaining.min(zeros.len());
+                    self.file.write_all(&zeros[..chunk])?;
+                    remaining -= chunk;
+                    if chunk % self.block_size == 0 {
+                        progress_cb((chunk / self.block_size) as u64);
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        // Non-Windows: traditional write-zero path
         let zeros = get_zero_buffer();
 
         for (start, end) in ranges.iter() {
-            let file_offset = (start as u64) * (self.block_size as u64);
+            let file_offset = start * (self.block_size as u64);
             let mut remaining = ((end - start) as usize) * self.block_size;
 
             self.file.seek(SeekFrom::Start(file_offset))?;
@@ -403,7 +463,7 @@ impl BlockFile {
                 let chunk = remaining.min(zeros.len());
                 self.file.write_all(&zeros[..chunk])?;
                 remaining -= chunk;
-                if chunk % self.block_size == 0 {
+                if chunk.is_multiple_of(self.block_size) {
                     progress_cb((chunk / self.block_size) as u64);
                 }
             }

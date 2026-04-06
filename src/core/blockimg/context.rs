@@ -7,8 +7,14 @@ use std::io::{self, Read};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
-/// Buffer size for producer-consumer channel (1MB chunks).
-const CHANNEL_CHUNK_SIZE: usize = 1024 * 1024;
+/// Buffer size for producer-consumer channel (4 MiB chunks).
+/// Increased from 1 MiB to reduce channel handoff overhead for large OTA files.
+const CHANNEL_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+
+/// Decompression read buffer size (256 KiB).
+/// Larger than the default 64 KiB to reduce syscall overhead during
+/// decompression of compressed OTA data on SATA SSDs.
+const DECOMP_BUF_SIZE: usize = 256 * 1024;
 
 /// Background thread decompressor for new data.
 /// Matches C++ pthread behavior: background thread decompresses while
@@ -24,26 +30,38 @@ impl ParallelNewDataReader {
     /// Open new data with background decompressor thread.
     pub fn open(path: &std::path::Path) -> Result<Self> {
         let path = path.to_path_buf();
-        
+
         // Determine file type
         let (file_path, ext) = match File::open(&path) {
-            Ok(_) => (path.clone(), path.extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_lowercase()),
+            Ok(_) => (
+                path.clone(),
+                path.extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase(),
+            ),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let br_path = std::path::PathBuf::from(format!("{}.br", path.display()));
                 let lzma_path = std::path::PathBuf::from(format!("{}.lzma", path.display()));
                 let xz_path = std::path::PathBuf::from(format!("{}.xz", path.display()));
 
-                if let Ok(_) = File::open(&br_path) {
-                    log::info!("auto-fallback to compressed new data: {}", br_path.display());
+                if File::open(&br_path).is_ok() {
+                    log::info!(
+                        "auto-fallback to compressed new data: {}",
+                        br_path.display()
+                    );
                     (br_path, "br".to_string())
-                } else if let Ok(_) = File::open(&lzma_path) {
-                    log::info!("auto-fallback to compressed new data: {}", lzma_path.display());
+                } else if File::open(&lzma_path).is_ok() {
+                    log::info!(
+                        "auto-fallback to compressed new data: {}",
+                        lzma_path.display()
+                    );
                     (lzma_path, "lzma".to_string())
-                } else if let Ok(_) = File::open(&xz_path) {
-                    log::info!("auto-fallback to compressed new data: {}", xz_path.display());
+                } else if File::open(&xz_path).is_ok() {
+                    log::info!(
+                        "auto-fallback to compressed new data: {}",
+                        xz_path.display()
+                    );
                     (xz_path, "xz".to_string())
                 } else {
                     return Err(e.into());
@@ -52,7 +70,10 @@ impl ParallelNewDataReader {
             Err(e) => return Err(e.into()),
         };
 
-        log::info!("starting background decompressor thread for: {}", file_path.display());
+        log::info!(
+            "starting background decompressor thread for: {}",
+            file_path.display()
+        );
 
         // Create channel for producer-consumer
         let (sender, receiver) = mpsc::channel::<Vec<u8>>();
@@ -79,21 +100,30 @@ impl ParallelNewDataReader {
         sender: Sender<Vec<u8>>,
     ) -> Result<()> {
         let file = File::open(&path)?;
-        
+
         let mut reader: Box<dyn Read + Send> = match ext.as_str() {
             "br" => {
-                log::info!("background: using Brotli decompressor");
-                Box::new(brotli::Decompressor::new(file, 65536))
+                log::info!(
+                    "background: using Brotli decompressor (buf={} KiB)",
+                    DECOMP_BUF_SIZE / 1024
+                );
+                Box::new(brotli::Decompressor::new(file, DECOMP_BUF_SIZE))
             }
             "lzma" | "xz" => {
-                log::info!("background: using XZ/LZMA decompressor");
+                log::info!(
+                    "background: using XZ/LZMA decompressor (buf={} KiB)",
+                    DECOMP_BUF_SIZE / 1024
+                );
                 Box::new(xz2::read::XzDecoder::new(
-                    std::io::BufReader::with_capacity(65536, file),
+                    std::io::BufReader::with_capacity(DECOMP_BUF_SIZE, file),
                 ))
             }
             _ => {
-                log::info!("background: using raw file reader");
-                Box::new(file)
+                log::info!(
+                    "background: using raw file reader (buf={} KiB)",
+                    DECOMP_BUF_SIZE / 1024
+                );
+                Box::new(std::io::BufReader::with_capacity(DECOMP_BUF_SIZE, file))
             }
         };
 
@@ -131,34 +161,34 @@ impl ParallelNewDataReader {
             }
             Err(_) => Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                "background decompressor channel closed"
-            ).into()),
+                "background decompressor channel closed",
+            )
+            .into()),
         }
     }
 
     /// Read exact number of bytes from background thread.
     pub fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
         let mut filled = 0;
-        
+
         while filled < buf.len() {
             // Refill if buffer empty
             if self.buffer_pos >= self.buffer.len() {
                 self.refill_buffer()?;
             }
-            
+
             // Copy from internal buffer
             let available = self.buffer.len() - self.buffer_pos;
             let needed = buf.len() - filled;
             let to_copy = available.min(needed);
-            
-            buf[filled..filled + to_copy].copy_from_slice(
-                &self.buffer[self.buffer_pos..self.buffer_pos + to_copy]
-            );
-            
+
+            buf[filled..filled + to_copy]
+                .copy_from_slice(&self.buffer[self.buffer_pos..self.buffer_pos + to_copy]);
+
             self.buffer_pos += to_copy;
             filled += to_copy;
         }
-        
+
         Ok(())
     }
 
@@ -173,7 +203,7 @@ impl ParallelNewDataReader {
     /// Skip blocks (consume without returning).
     pub fn skip_blocks(&mut self, count: u64, block_size: usize) -> Result<()> {
         let mut len = (count as usize) * block_size;
-        let mut buf = vec![0u8; 65536.min(len)];
+        let mut buf = vec![0u8; DECOMP_BUF_SIZE.min(len)];
         while len > 0 {
             let to_read = len.min(buf.len());
             self.read_exact(&mut buf[..to_read])?;
@@ -196,7 +226,7 @@ pub struct NewDataReader {
 impl NewDataReader {
     pub fn open(path: &std::path::Path) -> Result<Self> {
         // ParallelNewDataReader is the default, this fallback shouldn't be used
-        
+
         let (file, ext) = match File::open(path) {
             Ok(f) => {
                 let ext = path
@@ -239,24 +269,24 @@ impl NewDataReader {
         let reader: Box<dyn Read> = match ext.as_str() {
             "br" => {
                 log::info!("using Brotli streaming decompressor for new data");
-                Box::new(brotli::Decompressor::new(file, 65536))
+                Box::new(brotli::Decompressor::new(file, DECOMP_BUF_SIZE))
             }
             "lzma" => {
                 log::info!("using LZMA streaming decompressor for new data");
                 let stream = xz2::stream::Stream::new_lzma_decoder(u64::MAX)
                     .map_err(|e| anyhow::anyhow!("failed to create LZMA decoder: {}", e))?;
                 Box::new(xz2::read::XzDecoder::new_stream(
-                    std::io::BufReader::with_capacity(65536, file),
+                    std::io::BufReader::with_capacity(DECOMP_BUF_SIZE, file),
                     stream,
                 ))
             }
             "xz" => {
                 log::info!("using XZ streaming decompressor for new data");
                 Box::new(xz2::read::XzDecoder::new(
-                    std::io::BufReader::with_capacity(65536, file),
+                    std::io::BufReader::with_capacity(DECOMP_BUF_SIZE, file),
                 ))
             }
-            _ => Box::new(file),
+            _ => Box::new(std::io::BufReader::with_capacity(DECOMP_BUF_SIZE, file)),
         };
 
         Ok(Self { reader })
@@ -271,7 +301,7 @@ impl NewDataReader {
 
     pub fn skip_blocks(&mut self, count: u64, block_size: usize) -> Result<()> {
         let mut len = (count as usize) * block_size;
-        let mut buf = vec![0u8; 65536.min(len)];
+        let mut buf = vec![0u8; DECOMP_BUF_SIZE.min(len)];
         while len > 0 {
             let to_read = len.min(buf.len());
             self.reader.read_exact(&mut buf[..to_read])?;
@@ -361,6 +391,12 @@ impl CommandContext {
         }
     }
 
+    /// Load source blocks into a contiguous buffer for patch application.
+    ///
+    /// This is the standard path for bsdiff/imgdiff which require all source
+    /// data as a single contiguous buffer. For simple move operations without
+    /// stash refs, prefer [`load_src_blocks_cow`](Self::load_src_blocks_cow)
+    /// to avoid unnecessary copies.
     pub fn load_src_blocks(
         &mut self,
         src_ranges: &Option<RangeSet>,
@@ -402,8 +438,12 @@ impl CommandContext {
             }
         }
 
+        // 方案6: Stream stash reads — only load the specific ranges needed
+        // instead of reading the entire stash file into memory.
         for (stash_id, map_ranges) in stash_refs {
-            let stash_data = self.stash.load(stash_id)?;
+            let stash_data = self
+                .stash
+                .load_ranges(stash_id, map_ranges, self.block_size)?;
 
             let mut stash_off = 0usize;
             for (start, end) in map_ranges.iter() {
@@ -423,5 +463,20 @@ impl CommandContext {
         }
 
         Ok(buffer)
+    }
+
+    /// Load source blocks with minimal allocation.
+    ///
+    /// For simple cases (no stash refs, no buffer map), this avoids
+    /// copying through an intermediate buffer by reading source ranges
+    /// directly. Falls back to `load_src_blocks` for complex cases.
+    ///
+    /// 方案2/8: Zero-copy optimization for simple move commands.
+    pub fn load_src_blocks_simple(&mut self, src_ranges: &RangeSet) -> Result<Vec<u8>> {
+        if let Some(ref s) = self.source {
+            s.read_ranges(src_ranges)
+        } else {
+            self.target.read_ranges(src_ranges)
+        }
     }
 }

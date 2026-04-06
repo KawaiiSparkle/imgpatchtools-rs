@@ -103,7 +103,7 @@ pub fn range_sha1(file_path: &Path, ranges_str: &str, block_size: usize) -> Resu
     // Open file and mmap for zero-copy access (eliminates read syscalls)
     let file = std::fs::File::open(file_path)
         .with_context(|| format!("failed to open {}", file_path.display()))?;
-    
+
     let file_len = file.metadata()?.len();
     if file_len == 0 {
         // Empty file - return SHA1 of empty data
@@ -122,7 +122,7 @@ pub fn range_sha1(file_path: &Path, ranges_str: &str, block_size: usize) -> Resu
         let end_byte = ((end as usize) * block_size).min(file_len as usize);
         hasher.update(&mmap[start_byte..end_byte]);
     }
-    
+
     let res = hasher.finalize();
     Ok(res.iter().map(|b| format!("{:02x}", b)).collect())
 }
@@ -175,7 +175,7 @@ fn initialise_target_from_source(
 }
 
 fn open_or_create_target(path: &Path, tl: &TransferList) -> Result<BlockFile> {
-    let expected_len = tl.total_blocks() as u64 * BLOCK_SIZE as u64;
+    let expected_len = tl.total_blocks() * BLOCK_SIZE as u64;
 
     if path.exists() {
         let meta = fs::metadata(path)

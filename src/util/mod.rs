@@ -6,8 +6,10 @@
 //! | [`hash`]     | SHA-1 / SHA-256 helpers                     |
 //! | [`io`]       | High-performance file I/O (mmap, block r/w) |
 //! | [`progress`] | Progress-bar wrapper around `indicatif`     |
+//! | [`platform`] | Platform-specific I/O optimizations         |
 
 pub mod hash;
 pub mod io;
+pub mod platform;
 pub mod progress;
 pub mod rangeset;

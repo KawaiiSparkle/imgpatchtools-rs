@@ -163,31 +163,31 @@ pub fn block_image_verify(target_path: &Path, transfer_list_path: &Path) -> Resu
 
 pub fn range_sha1(file_path: &Path, ranges: &RangeSet, block_size: usize) -> Result<String> {
     ensure!(block_size > 0, "block_size must be positive");
-    
+
     // Use mmap for fast zero-copy hashing - much faster than read_ranges()
     use memmap2::MmapOptions;
     use sha1::{Digest, Sha1};
-    
+
     let file = std::fs::File::open(file_path)
         .with_context(|| format!("range_sha1: failed to open {}", file_path.display()))?;
-    
+
     let file_len = file.metadata()?.len();
     if file_len == 0 {
         let hasher = Sha1::new();
         let res = hasher.finalize();
         return Ok(res.iter().map(|b| format!("{:02x}", b)).collect());
     }
-    
+
     // Memory map for direct access - eliminates read syscalls and memory copies
     let mmap = unsafe { MmapOptions::new().map(&file)? };
-    
+
     let mut hasher = Sha1::new();
     for (start, end) in ranges.iter() {
         let start_byte = (start as usize) * block_size;
         let end_byte = ((end as usize) * block_size).min(file_len as usize);
         hasher.update(&mmap[start_byte..end_byte]);
     }
-    
+
     let res = hasher.finalize();
     Ok(res.iter().map(|b| format!("{:02x}", b)).collect())
 }

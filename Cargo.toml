@@ -5,7 +5,8 @@ edition = "2021"
 authors = ["KawaiiSparkle"]
 description = "Rust reimplementation of Android imgpatchtools"
 license = "GPL-3.0"
-
+[build]
+jobs = 8
 [profile.dev]
 # Fast debug build settings
 codegen-units = 16
@@ -45,6 +46,9 @@ lru         = "0.16"
 
 [target.'cfg(unix)'.dependencies]
 libc        = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
 
 [dev-dependencies]
 assert_cmd         = "2"

@@ -116,7 +116,7 @@ impl RangeSet {
 
         let count: usize = tokens[0].parse().context("invalid range count token")?;
 
-        ensure!(count % 2 == 0, "range count must be even, got {count}");
+        ensure!(count.is_multiple_of(2), "range count must be even, got {count}");
         ensure!(
             tokens.len() == count + 1,
             "expected {} tokens after count, found {}",
@@ -656,5 +656,3 @@ impl RangeSet {
         }
     }
 }
-
-

@@ -92,7 +92,12 @@ impl StepTimer {
             } else {
                 0.0
             };
-            println!("  {:40} {:>10} ({:5.1}%)", name, format_duration(*duration), pct);
+            println!(
+                "  {:40} {:>10} ({:5.1}%)",
+                name,
+                format_duration(*duration),
+                pct
+            );
         }
         println!("  {:40} {:>10}", "─".repeat(40), "─".repeat(10));
         println!("  {:40} {:>10}", "TOTAL", format_duration(total));
@@ -103,7 +108,12 @@ impl StepTimer {
 /// Format a duration in human-readable form.
 fn format_duration(d: Duration) -> String {
     if d.as_secs() >= 3600 {
-        format!("{}h {:02}m {:02}s", d.as_secs() / 3600, (d.as_secs() % 3600) / 60, d.as_secs() % 60)
+        format!(
+            "{}h {:02}m {:02}s",
+            d.as_secs() / 3600,
+            (d.as_secs() % 3600) / 60,
+            d.as_secs() % 60
+        )
     } else if d.as_secs() >= 60 {
         format!("{}m {:02}s", d.as_secs() / 60, d.as_secs() % 60)
     } else if d.as_secs() > 0 {
@@ -368,7 +378,10 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
         if script_path.exists() {
             fs::remove_file(&script_path)
                 .with_context(|| format!("delete updater script {}", script_path.display()))?;
-            log::info!("deleted updater script after successful execution: {}", script_path.display());
+            log::info!(
+                "deleted updater script after successful execution: {}",
+                script_path.display()
+            );
         }
 
         // Clean up workdir: keep only allowed files.
@@ -432,7 +445,10 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
 
     // Clean up workdir after successful completion.
     if workdir.exists() {
-        log::info!("cleaning up workdir after successful batch: {}", workdir.display());
+        log::info!(
+            "cleaning up workdir after successful batch: {}",
+            workdir.display()
+        );
         if let Err(e) = fs::remove_dir_all(workdir) {
             log::warn!("failed to clean up workdir: {}", e);
         } else {
@@ -550,11 +566,11 @@ fn cleanup_workdir(ota_dir: &Path) -> Result<()> {
     for entry in fs::read_dir(ota_dir).context("read ota_dir for cleanup")? {
         let entry = entry.context("read dir entry")?;
         let path = entry.path();
-        
+
         if path.is_file() {
             let filename = entry.file_name();
             let filename_str = filename.to_string_lossy();
-            
+
             if !is_allowed_file(&filename_str) {
                 files_to_delete.push(path);
             }
@@ -562,7 +578,7 @@ fn cleanup_workdir(ota_dir: &Path) -> Result<()> {
             // Mark directories for deletion (except hidden backup dir)
             let dirname = entry.file_name();
             let dirname_str = dirname.to_string_lossy();
-            
+
             if dirname_str != ".batch_backup" {
                 dirs_to_delete.push(path);
             }
@@ -581,7 +597,11 @@ fn cleanup_workdir(ota_dir: &Path) -> Result<()> {
     // Delete directories recursively
     for path in dirs_to_delete {
         if let Err(e) = fs::remove_dir_all(&path) {
-            log::warn!("cleanup: failed to delete directory {}: {}", path.display(), e);
+            log::warn!(
+                "cleanup: failed to delete directory {}: {}",
+                path.display(),
+                e
+            );
         } else {
             log::debug!("cleanup: deleted directory {}", path.display());
         }
@@ -795,7 +815,7 @@ fn extract_partition_names(script: &str) -> Vec<String> {
         let rest = &script[i + "/by-name/".len()..];
         // Partition name ends at a delimiter: quote, close-paren, comma, space, or line end.
         let end = rest
-            .find(|c: char| c == '"' || c == ')' || c == ',' || c == ' ' || c == '\n')
+            .find(['"', ')', ',', ' ', '\n'])
             .unwrap_or(rest.len());
         let name = rest[..end].trim();
         if !name.is_empty()
@@ -818,7 +838,7 @@ fn extract_partition_names(script: &str) -> Vec<String> {
         for part in script.split(suffix) {
             let trimmed = part.trim_end_matches(|c: char| c.is_whitespace());
             // Find the last "word" before the suffix.
-            if let Some(pos) = trimmed.rfind(|c: char| c == '"' || c == '(' || c == '/' || c == ' ')
+            if let Some(pos) = trimmed.rfind(['"', '(', '/', ' '])
             {
                 let name = trimmed[pos + 1..].trim();
                 if !name.is_empty()
