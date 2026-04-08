@@ -1,3 +1,9 @@
+//! `bsdiff` command — port of AOSP `PerformCommandDiff` for bsdiff patches.
+//!
+//! Applies bsdiff patches with pre-verification optimization:
+//! - Checks target blocks first; skips if already correct (resumable OTA)
+//! - Verifies source hash before patching
+
 use crate::core::applypatch::bspatch;
 use crate::core::blockimg::context::CommandContext;
 use crate::core::blockimg::transfer_list::TransferCommand;
@@ -11,37 +17,74 @@ pub fn cmd_bsdiff(ctx: &mut CommandContext, cmd: &TransferCommand) -> Result<()>
         .context("bsdiff: missing target_ranges")?;
     let patch_offset = cmd.patch_offset.context("bsdiff: missing patch_offset")?;
     let patch_len = cmd.patch_len.context("bsdiff: missing patch_len")?;
-    let nblk = cmd
-        .src_block_count
-        .context("bsdiff: missing src_block_count")?;
+    
+    // Get source ranges - required for bsdiff
+    let src_ranges = cmd
+        .src_ranges
+        .as_ref()
+        .context("bsdiff: missing src_ranges")?;
 
-    let src_data = ctx.load_src_blocks(
-        &cmd.src_ranges,
-        &cmd.src_buffer_map,
-        &cmd.src_stash_refs,
-        nblk,
-    )?;
+    // Step 1: Check if target already has expected content (resumable OTA)
+    if let Some(ref expected_tgt_hash) = cmd.target_hash {
+        match ctx.target.read_ranges(target_ranges) {
+            Ok(tgt_data) => {
+                let actual_tgt_hash = hash::sha1_hex(&tgt_data);
+                if actual_tgt_hash == *expected_tgt_hash {
+                    log::info!(
+                        "bsdiff: target already has expected hash {}, skipping",
+                        expected_tgt_hash
+                    );
+                    ctx.blocks_advanced_this_cmd = target_ranges.blocks();
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                log::debug!("bsdiff: target read failed: {}", e);
+            }
+        }
+    }
+
+    // Step 2: Load source blocks (corrected: provide empty stash_map as 2nd arg)
+    let empty_stash_map = std::collections::HashMap::new();
+    let src_data = ctx.load_src_blocks(src_ranges, &empty_stash_map)?;
+    
+    // Step 3: Verify source hash
     if let Some(ref expected_src_hash) = cmd.src_hash {
         let actual_src_hash = hash::sha1_hex(&src_data);
         ensure!(
             actual_src_hash == *expected_src_hash,
-            "bsdiff: source hash mismatch"
+            "bsdiff: source hash mismatch: expected {}, got {}",
+            expected_src_hash,
+            actual_src_hash
         );
     }
 
+    // Step 4: Read patch and apply
     let patch_bytes = ctx.patch_data.read_patch(patch_offset, patch_len)?;
     let target_data = bspatch::apply_bspatch_at(&src_data, patch_bytes, 0)?;
 
-    ctx.target.write_ranges(target_ranges, &target_data)?;
-
-    if let Some(ref expected_tgt_hash) = cmd.target_hash {
+    // Step 5: Verify target data before writing
+    if let Some(ref expected_tgt_hash) =cmd.target_hash {
         let actual_tgt_hash = hash::sha1_hex(&target_data);
         ensure!(
             actual_tgt_hash == *expected_tgt_hash,
-            "bsdiff: target hash mismatch"
+            "bsdiff: target hash mismatch before write: expected {}, got {}",
+            expected_tgt_hash,
+            actual_tgt_hash
         );
     }
 
+    // Step 6: Write to target
+    ctx.target.write_ranges(target_ranges, &target_data)?;
+
     ctx.written_blocks += target_ranges.blocks();
+    ctx.blocks_advanced_this_cmd = target_ranges.blocks();
+    
+    log::debug!(
+        "bsdiff: patched {} blocks (total written: {})",
+        target_ranges.blocks(),
+        ctx.written_blocks
+    );
+    
     Ok(())
 }

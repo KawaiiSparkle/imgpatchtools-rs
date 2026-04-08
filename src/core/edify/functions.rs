@@ -559,7 +559,7 @@ fn fn_block_image_update(ctx: &mut FunctionContext, args: &[Value]) -> Result<Va
         &nd,
         &pd,
         None,
-        Path::new(&format!("{}/stash", ctx.workdir)),
+        &PathBuf::from(&ctx.workdir).join("stash"),
         true,
         None,
     )?;

@@ -21,6 +21,6 @@ debug = true
 debug-assertions = false
 overflow-checks = false
 lto = "thin"         # 或 "fat"
-codegen-units = 1
+codegen-units = 16
 strip = "symbols"
 incremental = false  # 增量编译在这种配置下意义不大，还可能更慢

@@ -13,10 +13,10 @@ use std::sync::OnceLock;
 /// Reusable zero-fill chunk size (64 MiB - maximize throughput).
 const ZERO_BUF_SIZE: usize = 64 * 1024 * 1024;
 
-/// Buffered I/O buffer size for non-mmap reads/writes (256 KiB).
+/// Buffered I/O buffer size for non-mmap reads/writes (512 KiB).
 /// Larger than OS default (4-8 KiB) to reduce syscall overhead on
 /// constrained hardware (i5-3470s, SATA SSD).
-const BUF_IO_SIZE: usize = 256 * 1024;
+const BUF_IO_SIZE: usize = 512 * 1024;
 
 /// Global zero buffer - allocate once, reuse forever.
 static ZERO_BUFFER: OnceLock<Vec<u8>> = OnceLock::new();
@@ -30,6 +30,10 @@ fn get_zero_buffer() -> &'static [u8] {
 /// (1.8 GB available RAM). Large files (10+ GB source images) are better
 /// served by explicit buffered I/O with large buffers.
 const MMAP_THRESHOLD: u64 = 16 * 1024 * 1024; // 16 MB
+
+/// Threshold for using mmap writes: writes larger than this use mmap.
+/// Mmap writes are faster for large sequential writes but have setup cost.
+const MMAP_WRITE_THRESHOLD: usize = 128 * 1024 * 1024; // 128 MB
 
 // ---------------------------------------------------------------------------
 // BlockFile
@@ -48,6 +52,8 @@ pub struct BlockFile {
     block_size: usize,
     /// Total file length in bytes (cached, updated on resize).
     file_len: u64,
+    /// Path for remapping on write.
+    path: std::path::PathBuf,
 }
 
 impl BlockFile {
@@ -85,6 +91,7 @@ impl BlockFile {
             mmap,
             block_size,
             file_len,
+            path: path.to_path_buf(),
         })
     }
 
@@ -107,6 +114,7 @@ impl BlockFile {
             mmap: None,
             block_size,
             file_len,
+            path: path.to_path_buf(),
         })
     }
 
@@ -131,6 +139,11 @@ impl BlockFile {
             .set_len(required_len)
             .context("set_len for file extension")?;
         self.file_len = required_len;
+
+        // Drop old mmap if size changed significantly
+        if self.mmap.is_some() && required_len > MMAP_THRESHOLD {
+            self.mmap = None; // Will be re-mapped on next read
+        }
 
         Ok(())
     }
@@ -195,7 +208,7 @@ impl BlockFile {
     where
         F: FnMut(&[u8]) -> Result<()>,
     {
-        let mut buf = vec![0u8; ZERO_BUF_SIZE]; // Use 8 MiB stream buffer
+        let mut buf = vec![0u8; ZERO_BUF_SIZE]; // Use 64 MiB stream buffer
         let mut f = &self.file;
         for (start, end) in ranges.iter() {
             let file_offset = start * (self.block_size as u64);
@@ -214,6 +227,7 @@ impl BlockFile {
     }
 
     /// Write a contiguous buffer of data to a set of non-contiguous block ranges.
+    /// Automatically selects mmap path for large writes.
     pub fn write_ranges(&mut self, ranges: &RangeSet, data: &[u8]) -> Result<()> {
         let required_len = (ranges.blocks() as usize) * self.block_size;
         ensure!(
@@ -223,6 +237,12 @@ impl BlockFile {
             required_len
         );
 
+        // Use mmap for large sequential writes (much faster)
+        if data.len() >= MMAP_WRITE_THRESHOLD && ranges.iter().count() == 1 {
+            return self.write_ranges_mmap(ranges, data);
+        }
+
+        // Standard buffered I/O for small or scattered writes
         let mut data_offset = 0usize;
         for (start, end) in ranges.iter() {
             let num_blocks = end - start;
@@ -249,6 +269,46 @@ impl BlockFile {
         Ok(())
     }
 
+    /// Write ranges using memory-mapped I/O (optimized for large sequential writes).
+    /// 
+    /// CRITICAL: Uses synchronous flush to ensure Bit-Exact consistency.
+    /// Async flush would risk data loss on crash and verification failures.
+    fn write_ranges_mmap(&mut self, ranges: &RangeSet, data: &[u8]) -> Result<()> {
+        // Remap file as mutable
+        let mut mmap = unsafe { memmap2::MmapMut::map_mut(&self.file)? };
+
+        let mut data_offset = 0usize;
+        for (start, end) in ranges.iter() {
+            let num_blocks = end - start;
+            let write_len = (num_blocks as usize) * self.block_size;
+            let file_offset = (start as usize) * self.block_size;
+
+            ensure!(
+                file_offset + write_len <= self.file_len as usize,
+                "mmap write range [{}, {}) exceeds file bounds (len {})",
+                file_offset,
+                file_offset + write_len,
+                self.file_len
+            );
+
+            // Direct memory copy - no system calls
+            mmap[file_offset..file_offset + write_len]
+                .copy_from_slice(&data[data_offset..data_offset + write_len]);
+
+            data_offset += write_len;
+        }
+
+        // CRITICAL FIX: Synchronous flush ensures data is written to disk
+        // before returning. This guarantees Bit-Exact consistency and
+        // prevents race conditions with subsequent read operations.
+        mmap.flush().context("sync flush of mmap writes")?;
+        
+        // Additional safety: sync file metadata to ensure durability
+        self.file.sync_data().context("sync_data after mmap write")?;
+
+        Ok(())
+    }
+
     /// Sequentially stream data from a reader into non-contiguous target block ranges.
     pub fn write_ranges_from_reader<F>(
         &mut self,
@@ -270,6 +330,7 @@ impl BlockFile {
             self.ensure_size(max_needed)?;
         }
 
+        // Use larger buffer for maximum throughput
         let mut buf = vec![0u8; ZERO_BUF_SIZE];
         for (start, end) in ranges.iter() {
             let file_offset = start * (self.block_size as u64);
@@ -303,6 +364,15 @@ impl BlockFile {
         F: FnMut(&mut [u8]) -> Result<()>,
         R: FnMut(u64),
     {
+        let total_bytes: usize = ranges.iter()
+            .map(|(s, e)| ((e - s) as usize) * self.block_size)
+            .sum();
+        
+        // Use mmap for large sequential writes
+        if total_bytes >= MMAP_WRITE_THRESHOLD && ranges.range_count() == 1 {
+            return self.write_ranges_with_callback_mmap(ranges, read_fn, progress_cb);
+        }
+
         let mut max_needed: u64 = self.file_len;
         for (_start, end) in ranges.iter() {
             let range_end = end * (self.block_size as u64);
@@ -335,6 +405,64 @@ impl BlockFile {
         Ok(())
     }
 
+    /// Mmap-optimized version of write_ranges_with_callback for large writes.
+    /// 
+    /// CRITICAL: Uses synchronous flush to ensure Bit-Exact consistency.
+    fn write_ranges_with_callback_mmap<F, R>(
+        &mut self,
+        ranges: &RangeSet,
+        mut read_fn: F,
+        mut progress_cb: R,
+    ) -> Result<()>
+    where
+        F: FnMut(&mut [u8]) -> Result<()>,
+        R: FnMut(u64),
+    {
+        let mut max_needed: u64 = self.file_len;
+        for (_start, end) in ranges.iter() {
+            let range_end = end * (self.block_size as u64);
+            if range_end > max_needed {
+                max_needed = range_end;
+            }
+        }
+        if max_needed > self.file_len {
+            self.ensure_size(max_needed)?;
+        }
+
+        // Create mutable mmap for writing
+        let mut mmap = unsafe { memmap2::MmapMut::map_mut(&self.file)? };
+        let mut progress_blocks = 0u64;
+
+        for (start, end) in ranges.iter() {
+            let file_offset = (start as usize) * self.block_size;
+            let total_len = ((end - start) as usize) * self.block_size;
+            let mut written = 0usize;
+
+            // Write in chunks using callback
+            let mut temp_buf = vec![0u8; ZERO_BUF_SIZE];
+            while written < total_len {
+                let chunk = (total_len - written).min(temp_buf.len());
+                read_fn(&mut temp_buf[..chunk])?;
+                
+                // Copy to mmap
+                mmap[file_offset + written..file_offset + written + chunk]
+                    .copy_from_slice(&temp_buf[..chunk]);
+                
+                written += chunk;
+                if chunk.is_multiple_of(self.block_size) {
+                    progress_blocks += (chunk / self.block_size) as u64;
+                    progress_cb(progress_blocks);
+                }
+            }
+        }
+
+        // CRITICAL FIX: Synchronous flush ensures Bit-Exact consistency
+        mmap.flush().context("sync flush of mmap callback writes")?;
+        self.file.sync_data().context("sync_data after mmap callback write")?;
+        
+        Ok(())
+    }
+
     /// Directly copy ranges from a source BlockFile (bypassing large memory allocations).
     pub fn copy_ranges(&mut self, ranges: &RangeSet, src: &BlockFile) -> Result<()> {
         let mut max_needed: u64 = self.file_len;
@@ -350,6 +478,12 @@ impl BlockFile {
 
         // Use source mmap if available for faster reads
         if let Some(ref src_mmap) = src.mmap {
+            // For single large range, use mmap-to-mmap copy
+            if ranges.range_count() == 1 && src_mmap.len() >= MMAP_WRITE_THRESHOLD {
+                return self.copy_ranges_mmap(ranges, src_mmap);
+            }
+
+            // Otherwise fall back to chunked copy
             for (start, end) in ranges.iter() {
                 let file_offset = (start as usize) * src.block_size;
                 let total_len = ((end - start) as usize) * src.block_size;
@@ -381,13 +515,48 @@ impl BlockFile {
         Ok(())
     }
 
+    /// Mmap-to-mmap copy for maximum performance (zero kernel copies).
+    /// 
+    /// CRITICAL: Uses synchronous flush to ensure Bit-Exact consistency.
+    fn copy_ranges_mmap(
+        &mut self,
+        ranges: &RangeSet,
+        src_mmap: &memmap2::Mmap,
+    ) -> Result<()> {
+        let mut mmap = unsafe { memmap2::MmapMut::map_mut(&self.file)? };
+
+        for (start, end) in ranges.iter() {
+            let file_offset = (start as usize) * self.block_size;
+            let total_len = ((end - start) as usize) * self.block_size;
+
+            ensure!(
+                file_offset + total_len <= mmap.len(),
+                "mmap copy range exceeds destination bounds"
+            );
+            ensure!(
+                file_offset + total_len <= src_mmap.len(),
+                "mmap copy range exceeds source bounds"
+            );
+
+            // Single memcpy - no system calls
+            mmap[file_offset..file_offset + total_len]
+                .copy_from_slice(&src_mmap[file_offset..file_offset + total_len]);
+        }
+
+        // CRITICAL FIX: Synchronous flush ensures Bit-Exact consistency
+        mmap.flush().context("sync flush of mmap copy")?;
+        self.file.sync_data().context("sync_data after mmap copy")?;
+        
+        Ok(())
+    }
+
     pub fn zero_ranges(&mut self, ranges: &RangeSet) -> Result<()> {
         self.zero_ranges_with_progress(ranges, |_| {})
     }
 
     /// Fill a set of block ranges with zeroes, providing live progress updates.
     ///
-    /// On Windows (方案5), attempts to use `FSCTL_SET_SPARSE` + `FSCTL_SET_ZERO_DATA`
+    /// On Windows, attempts to use `FSCTL_SET_SPARSE` + `FSCTL_SET_ZERO_DATA`
     /// for each range, which de-allocates disk blocks instead of writing zeroes.
     /// Falls back to write-zero if the sparse API is unavailable.
     pub fn zero_ranges_with_progress<F>(
@@ -409,7 +578,7 @@ impl BlockFile {
             self.ensure_size(max_needed)?;
         }
 
-        // 方案5: Try Windows sparse file API first
+        // Try Windows sparse file API first
         #[cfg(target_os = "windows")]
         {
             let _ = crate::util::platform::set_sparse(&self.file);
@@ -450,6 +619,15 @@ impl BlockFile {
             return Ok(());
         }
 
+        // Try mmap zero for large contiguous ranges
+        let total_zero_bytes: usize = ranges.iter()
+            .map(|(s, e)| ((e - s) as usize) * self.block_size)
+            .sum();
+        
+        if total_zero_bytes >= MMAP_WRITE_THRESHOLD && ranges.range_count() == 1 {
+            return self.zero_ranges_mmap(ranges, progress_cb);
+        }
+
         // Non-Windows: traditional write-zero path
         let zeros = get_zero_buffer();
 
@@ -468,6 +646,38 @@ impl BlockFile {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Mmap-based zero fill for large ranges (much faster than write-zero).
+    /// 
+    /// CRITICAL: Uses synchronous flush to ensure Bit-Exact consistency.
+    fn zero_ranges_mmap<F>(&mut self, ranges: &RangeSet, mut progress_cb: F) -> Result<()>
+    where
+        F: FnMut(u64),
+    {
+        let mut mmap = unsafe { memmap2::MmapMut::map_mut(&self.file)? };
+        
+        for (start, end) in ranges.iter() {
+            let file_offset = (start as usize) * self.block_size;
+            let total_len = ((end - start) as usize) * self.block_size;
+
+            // Fill with zeroes using memset (libc)
+            unsafe {
+                std::ptr::write_bytes(
+                    mmap.as_mut_ptr().add(file_offset),
+                    0,
+                    total_len,
+                );
+            }
+
+            progress_cb(end - start);
+        }
+
+        // CRITICAL FIX: Synchronous flush ensures Bit-Exact consistency
+        mmap.flush().context("sync flush of mmap zero")?;
+        self.file.sync_data().context("sync_data after mmap zero")?;
+        
         Ok(())
     }
 

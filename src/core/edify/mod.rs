@@ -4,6 +4,9 @@ pub mod cli;
 pub mod functions;
 pub mod parser;
 
+// Re-export commonly used functions and types
+pub use parser::{read_range_sha1_from_script, read_range_sha1_info_from_script, RangeSha1Info};
+
 pub fn run(script_path: &str, workdir: &str) -> anyhow::Result<()> {
     let content = std::fs::read_to_string(script_path)
         .with_context(|| format!("failed to read {script_path}"))?;

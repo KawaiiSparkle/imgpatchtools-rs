@@ -52,9 +52,9 @@ AOSP 原版的补丁工具有其强大的功能，但也存在显著的局限性
 
 | :--- | :--- |
 
-| `blockimg` | 块镜像 OTA 操作：`update` (应用更新), `verify` (校验), `range-sha1` (范围哈希)。 |
+| `blockimg` | 块镜像 OTA 操作：`update` (自动检测配套文件), `verify` (校验), `range-sha1` (范围哈希)。 |
 
-| `applypatch` | 对单个文件应用 `bsdiff` 或 `imgdiff` 补丁。 |
+| `applypatch` | 对单个文件应用 `bsdiff` 或 `imgdiff` 补丁。支持从 `update-script` 读取参数。 |
 
 | `imgdiff` | 在两个文件之间创建一个 `imgdiff` 格式的补丁。 |
 
@@ -104,7 +104,11 @@ cargo build --release
 
 ```bash
 
-# 全量 OTA (无源镜像)
+# 自动检测当前目录下的配套文件：
+# system.transfer.list, system.new.dat(.br|.lzma), system.patch.dat
+imgpatchtools-rs blockimg update system
+
+# 全量 OTA (无源镜像) - 显式指定路径
 
 imgpatchtools-rs blockimg update\
 
@@ -125,7 +129,7 @@ imgpatchtools-rs blockimg update\
 
   system.transfer.list\
 
-  system.new.dat \
+  system.new.dat.br \
 
   system.patch.dat\
 
@@ -133,7 +137,45 @@ imgpatchtools-rs blockimg update\
 
 ```
 
-### 2. 解包 `super.img`
+### 2. 从 Update-Script 应用补丁
+
+使用自动从 `update-script` 读取的参数应用补丁。
+
+```bash
+# 从 update-script 读取 boot 分区的 apply_patch 参数
+# 搜索位置：./update-script 或 META-INF/com/google/android/update-script
+imgpatchtools-rs applypatch boot - --from-script
+
+# 显式指定补丁应用
+imgpatchtools-rs applypatch \
+  boot.img \
+  boot_patched.img \
+  <目标_sha1> \
+  <目标大小> \
+  patch/boot.img.p
+```
+
+### 3. 从 Update-Script 计算 Range SHA-1
+
+计算特定块范围的 SHA-1 哈希值，从 update-script 读取范围。
+当范围从 update-script 读取时，也会提取并比较预期的 SHA1。
+
+```bash
+# 从 update-script 自动读取 system 分区的 range_sha1 范围
+# 同时与脚本中的预期 SHA1 进行比较
+imgpatchtools-rs blockimg range-sha1 system
+# 输出：
+# Computed: e4c514166c64863dcfb97bfaa277efa8240c6115
+# Expected: e4c514166c64863dcfb97bfaa277efa8240c6115
+# Result: MATCH ✓
+
+# 显式指定范围（无比较）
+imgpatchtools-rs blockimg range-sha1 system.img "4,0,10,20,30"
+# 输出：
+# Computed: e4c514166c64863dcfb97bfaa277efa8240c6115
+```
+
+### 5. 解包 `super.img`
 
 从 `super.img` 中提取所有逻辑分区镜像。
 
@@ -143,7 +185,7 @@ imgpatchtools-rs lpunpack super.img -o ./unpacked_partitions
 
 ```
 
-### 3. 执行 `updater-script`
+### 6. 执行 `updater-script`
 
 在指定的工作目录中运行 Edify 脚本。
 
@@ -159,7 +201,7 @@ imgpatchtools-rs edify \
 
 ```
 
-### 4. 批量处理多个 OTA 包
+### 7. 批量处理多个 OTA 包
 
 通过依次应用一个全量 OTA 和多个增量 OTA，来重建最终的分区镜像。
 

@@ -39,8 +39,8 @@ The original AOSP patching tools are powerful but come with significant limitati
 
 | Command | Purpose |
 | :--- | :--- |
-| `blockimg` | Block-image OTA operations: `update`, `verify`, `range-sha1`. |
-| `applypatch` | Apply a `bsdiff` or `imgdiff` patch to a single file. |
+| `blockimg` | Block-image OTA operations: `update` (auto-detects companion files), `verify`, `range-sha1`. |
+| `applypatch` | Apply a `bsdiff` or `imgdiff` patch to a single file. Supports reading parameters from `update-script`. |
 | `imgdiff` | Create an `imgdiff`-format patch between two files. |
 | `edify` | Execute an Edify `updater-script`. |
 | `super` | Smart `super.img` builder from a directory of partition images. |
@@ -76,7 +76,11 @@ The final executable will be located at `target/release/imgpatchtools-rs`.
 Apply a block-based transfer list to generate a target image.
 
 ```bash
-# Full OTA (no source image)
+# Auto-detect companion files from current directory:
+# system.transfer.list, system.new.dat(.br|.lzma), system.patch.dat
+imgpatchtools-rs blockimg update system
+
+# Full OTA (no source image) - explicit paths
 imgpatchtools-rs blockimg update \
   system.img \
   system.transfer.list \
@@ -92,7 +96,45 @@ imgpatchtools-rs blockimg update \
   --source old-system.img
 ```
 
-### 2. Unpack a `super.img`
+### 2. Apply Patch from Update-Script
+
+Apply a patch using parameters automatically read from `update-script`.
+
+```bash
+# Read apply_patch parameters from update-script for boot partition
+# Searches: ./update-script or META-INF/com/google/android/update-script
+imgpatchtools-rs applypatch boot - --from-script
+
+# Explicit patch application
+imgpatchtools-rs applypatch \
+  boot.img \
+  boot_patched.img \
+  <target_sha1> \
+  <target_size> \
+  patch/boot.img.p
+```
+
+### 3. Compute Range SHA-1 from Update-Script
+
+Calculate SHA-1 hash for specific block ranges, reading ranges from update-script.
+When ranges are read from update-script, the expected SHA1 is also extracted and compared.
+
+```bash
+# Auto-read ranges from update-script for system partition
+# Also compares with expected SHA1 from the script
+imgpatchtools-rs blockimg range-sha1 system
+# Output:
+# Computed: e4c514166c64863dcfb97bfaa277efa8240c6115
+# Expected: e4c514166c64863dcfb97bfaa277efa8240c6115
+# Result: MATCH ✓
+
+# Explicit ranges (no comparison)
+imgpatchtools-rs blockimg range-sha1 system.img "4,0,10,20,30"
+# Output:
+# Computed: e4c514166c64863dcfb97bfaa277efa8240c6115
+```
+
+### 5. Unpack a `super.img`
 
 Extract all logical partition images from a `super.img`.
 
@@ -100,7 +142,7 @@ Extract all logical partition images from a `super.img`.
 imgpatchtools-rs lpunpack super.img -o ./unpacked_partitions
 ```
 
-### 3. Execute an `updater-script`
+### 6. Execute an `updater-script`
 
 Run an Edify script within a specified working directory.
 
@@ -111,7 +153,7 @@ imgpatchtools-rs edify \
   --workdir ./ota_extracted
 ```
 
-### 4. Batch-Process Multiple OTAs
+### 7. Batch-Process Multiple OTAs
 
 Reconstruct final partition images by applying a full OTA, followed by several incrementals.
 

@@ -113,7 +113,10 @@ pub fn run(args: &BatchArgs) -> Result<()> {
     let output_dir = args
         .output
         .clone()
-        .unwrap_or_else(|| format!("{}/output", args.workdir.trim_end_matches('/')));
+        .unwrap_or_else(|| {
+            let workdir_path = std::path::Path::new(&args.workdir);
+            workdir_path.join("output").to_string_lossy().into_owned()
+        });
 
     let config = super::BatchConfig {
         workdir: args.workdir.clone(),

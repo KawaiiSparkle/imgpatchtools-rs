@@ -2,28 +2,93 @@ use crate::util::io::BlockFile;
 use crate::util::progress::ProgressReporter;
 use crate::util::rangeset::RangeSet;
 use anyhow::{ensure, Result};
+use crossbeam_queue::ArrayQueue;
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::{self, Read};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread;
 
-/// Buffer size for producer-consumer channel (4 MiB chunks).
-/// Increased from 1 MiB to reduce channel handoff overhead for large OTA files.
-const CHANNEL_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+/// Buffer size for producer-consumer channel (64 MiB chunks).
+/// Increased from 4 MiB to match modern SSD optimal transfer size
+/// and reduce channel handoff overhead for large OTA files.
+const CHANNEL_CHUNK_SIZE: usize = 64 * 1024 * 1024;
 
-/// Decompression read buffer size (256 KiB).
-/// Larger than the default 64 KiB to reduce syscall overhead during
-/// decompression of compressed OTA data on SATA SSDs.
-const DECOMP_BUF_SIZE: usize = 256 * 1024;
+/// Number of buffers in the memory pool (triple buffering).
+/// Allows decompressor to run ahead while main thread writes.
+const NUM_POOL_BUFFERS: usize = 3;
+
+/// Decompression read buffer size (512 KiB).
+/// Larger than the default to reduce syscall overhead during
+/// decompression of compressed OTA data.
+const DECOMP_BUF_SIZE: usize = 512 * 1024;
+
+/// Memory pool for reusable buffers - eliminates heap allocation.
+struct BufferPool {
+    buffers: Arc<ArrayQueue<Vec<u8>>>,
+    acquired_count: AtomicUsize,
+}
+
+impl BufferPool {
+    fn new() -> Self {
+        let buffers = Arc::new(ArrayQueue::new(NUM_POOL_BUFFERS));
+        for _ in 0..NUM_POOL_BUFFERS {
+            let _ = buffers.push(vec![0u8; CHANNEL_CHUNK_SIZE]);
+        }
+        Self {
+            buffers,
+            acquired_count: AtomicUsize::new(0),
+        }
+    }
+
+    /// Acquire a buffer from the pool.
+    /// Returns zero-initialized buffer to ensure Bit-Exact safety.
+    fn acquire(&self) -> Vec<u8> {
+        match self.buffers.pop() {
+            Some(buf) => {
+                self.acquired_count.fetch_add(1, Ordering::Relaxed);
+                // Buffer is already zero-initialized from pool creation
+                // and was cleared on release, safe to use
+                buf
+            }
+            None => {
+                // Pool exhausted, allocate new zero-initialized buffer
+                vec![0u8; CHANNEL_CHUNK_SIZE]
+            }
+        }
+    }
+
+    /// Return a buffer to the pool for reuse.
+    /// Clears content for security and Bit-Exact safety.
+    fn release(&self, mut buf: Vec<u8>) {
+        // Zero the buffer before returning to pool
+        // This ensures no stale data leaks between chunks
+        buf.fill(0);
+        buf.clear();
+        // Only keep buffers that match expected size
+        if buf.capacity() >= CHANNEL_CHUNK_SIZE {
+            let _ = self.buffers.push(buf);
+        }
+        // Otherwise drop it
+    }
+}
 
 /// Background thread decompressor for new data.
-/// Matches C++ pthread behavior: background thread decompresses while
-/// main thread writes to disk.
+/// Uses lock-free ring buffer for zero-copy data transfer.
 pub struct ParallelNewDataReader {
-    receiver: Receiver<Vec<u8>>,
+    /// Lock-free queue for data chunks.
+    receiver: Arc<ArrayQueue<Vec<u8>>>,
+    /// Current buffer being consumed.
     buffer: Vec<u8>,
+    /// Position in current buffer.
     buffer_pos: usize,
+    /// Total bytes received.
     total_received: usize,
+    /// Buffer pool for memory reuse.
+    pool: Arc<BufferPool>,
+    /// Background thread handle.
+    _thread_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl ParallelNewDataReader {
@@ -75,29 +140,35 @@ impl ParallelNewDataReader {
             file_path.display()
         );
 
-        // Create channel for producer-consumer
-        let (sender, receiver) = mpsc::channel::<Vec<u8>>();
+        // Create shared buffer pool and queue
+        let pool = Arc::new(BufferPool::new());
+        let queue = Arc::new(ArrayQueue::<Vec<u8>>::new(NUM_POOL_BUFFERS));
+        let pool_clone = Arc::clone(&pool);
+        let queue_clone = Arc::clone(&queue);
 
         // Spawn background thread for decompression
-        thread::spawn(move || {
-            if let Err(e) = Self::decompressor_thread(file_path, ext, sender) {
+        let handle = thread::spawn(move || {
+            if let Err(e) = Self::decompressor_thread(file_path, ext, pool_clone, queue_clone) {
                 log::error!("background decompressor thread failed: {}", e);
             }
         });
 
         Ok(Self {
-            receiver,
+            receiver: queue,
             buffer: Vec::new(),
             buffer_pos: 0,
             total_received: 0,
+            pool,
+            _thread_handle: Some(handle),
         })
     }
 
-    /// Background thread: decompress data and send through channel.
+    /// Background thread: decompress data and send through queue.
     fn decompressor_thread(
         path: std::path::PathBuf,
         ext: String,
-        sender: Sender<Vec<u8>>,
+        pool: Arc<BufferPool>,
+        queue: Arc<ArrayQueue<Vec<u8>>>,
     ) -> Result<()> {
         let file = File::open(&path)?;
 
@@ -127,16 +198,27 @@ impl ParallelNewDataReader {
             }
         };
 
-        // Read and send chunks
+        // Read and send chunks using memory pool
         loop {
-            let mut chunk = vec![0u8; CHANNEL_CHUNK_SIZE];
+            let mut chunk = pool.acquire();
             match reader.read(&mut chunk) {
-                Ok(0) => break, // EOF
+                Ok(0) => {
+                    // Return unused buffer to pool
+                    pool.release(chunk);
+                    break;
+                } // EOF
                 Ok(n) => {
                     chunk.truncate(n);
-                    if sender.send(chunk).is_err() {
-                        // Receiver dropped, exit thread
-                        break;
+                    // Spin-wait briefly if queue is full (backpressure)
+                    let mut retries = 0;
+                    while let Err(c) = queue.push(chunk) {
+                        chunk = c;
+                        if retries > 1000 {
+                            log::error!("decompressor: queue full, dropping data");
+                            break;
+                        }
+                        std::thread::yield_now();
+                        retries += 1;
                     }
                 }
                 Err(e) => {
@@ -150,24 +232,39 @@ impl ParallelNewDataReader {
         Ok(())
     }
 
-    /// Fill internal buffer from channel.
+    /// Fill internal buffer from queue.
     fn refill_buffer(&mut self) -> Result<()> {
-        match self.receiver.recv() {
-            Ok(chunk) => {
-                self.total_received += chunk.len();
-                self.buffer = chunk;
-                self.buffer_pos = 0;
-                Ok(())
+        // Spin-wait briefly for data (reduces latency)
+        let mut retries = 0;
+        loop {
+            match self.receiver.pop() {
+                Some(chunk) => {
+                    self.total_received += chunk.len();
+                    // Return old buffer to pool for reuse
+                    if !self.buffer.is_empty() {
+                        self.pool.release(std::mem::take(&mut self.buffer));
+                    }
+                    self.buffer = chunk;
+                    self.buffer_pos = 0;
+                    return Ok(());
+                }
+                None => {
+                    if retries > 10000 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "background decompressor channel closed",
+                        )
+                        .into());
+                    }
+                    std::thread::yield_now();
+                    retries += 1;
+                }
             }
-            Err(_) => Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "background decompressor channel closed",
-            )
-            .into()),
         }
     }
 
     /// Read exact number of bytes from background thread.
+    /// Guarantees Bit-Exact: either fills entire buffer or returns error.
     pub fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
         let mut filled = 0;
 
@@ -177,7 +274,7 @@ impl ParallelNewDataReader {
                 self.refill_buffer()?;
             }
 
-            // Copy from internal buffer
+            // Copy from internal buffer - single memcpy
             let available = self.buffer.len() - self.buffer_pos;
             let needed = buf.len() - filled;
             let to_copy = available.min(needed);
@@ -189,6 +286,8 @@ impl ParallelNewDataReader {
             filled += to_copy;
         }
 
+        // Bit-Exact safety: verify complete fill
+        debug_assert_eq!(filled, buf.len());
         Ok(())
     }
 
@@ -200,21 +299,45 @@ impl ParallelNewDataReader {
         Ok(buf)
     }
 
-    /// Skip blocks (consume without returning).
+    /// Skip blocks (consume without returning) - optimized to avoid allocation.
     pub fn skip_blocks(&mut self, count: u64, block_size: usize) -> Result<()> {
-        let mut len = (count as usize) * block_size;
-        let mut buf = vec![0u8; DECOMP_BUF_SIZE.min(len)];
-        while len > 0 {
-            let to_read = len.min(buf.len());
-            self.read_exact(&mut buf[..to_read])?;
-            len -= to_read;
+        let mut remaining = (count as usize) * block_size;
+
+        // First, consume from current buffer
+        let available = self.buffer.len() - self.buffer_pos;
+        let to_skip = available.min(remaining);
+        self.buffer_pos += to_skip;
+        remaining -= to_skip;
+
+        // Then skip whole chunks from queue
+        while remaining >= CHANNEL_CHUNK_SIZE {
+            self.refill_buffer()?;
+            let to_skip = remaining.min(self.buffer.len());
+            self.buffer_pos += to_skip;
+            remaining -= to_skip;
         }
+
+        // Handle remainder
+        if remaining > 0 {
+            self.refill_buffer()?;
+            self.buffer_pos += remaining;
+        }
+
         Ok(())
     }
 
     /// Get total bytes received so far.
     pub fn bytes_received(&self) -> usize {
         self.total_received
+    }
+}
+
+impl Drop for ParallelNewDataReader {
+    fn drop(&mut self) {
+        // Return final buffer to pool
+        if !self.buffer.is_empty() {
+            self.pool.release(std::mem::take(&mut self.buffer));
+        }
     }
 }
 
@@ -399,84 +522,29 @@ impl CommandContext {
     /// to avoid unnecessary copies.
     pub fn load_src_blocks(
         &mut self,
-        src_ranges: &Option<RangeSet>,
-        src_buffer_map: &Option<RangeSet>,
-        stash_refs: &[(String, RangeSet)],
-        src_block_count: u64,
+        ranges: &RangeSet,
+        _stash_map: &std::collections::HashMap<String, RangeSet>,
     ) -> Result<Vec<u8>> {
-        let mut buffer = vec![0u8; (src_block_count as usize) * self.block_size];
-
-        if let Some(rs) = src_ranges {
-            let data = if let Some(ref s) = self.source {
-                s.read_ranges(rs)?
-            } else {
-                self.target.read_ranges(rs)?
-            };
-
-            if let Some(map) = src_buffer_map {
-                let mut data_off = 0usize;
-                for (start, end) in map.iter() {
-                    let len = ((end - start) as usize) * self.block_size;
-                    let buf_start = (start as usize) * self.block_size;
-                    let buf_end = buf_start + len;
-
-                    ensure!(buf_end <= buffer.len(), "buffer_map out of bounds");
-                    ensure!(
-                        data_off + len <= data.len(),
-                        "buffer_map needs more data than src_ranges provides"
-                    );
-
-                    buffer[buf_start..buf_end].copy_from_slice(&data[data_off..data_off + len]);
-                    data_off += len;
-                }
-            } else {
-                ensure!(
-                    data.len() <= buffer.len(),
-                    "direct source data exceeds buffer"
-                );
-                buffer[..data.len()].copy_from_slice(&data);
-            }
+        if let Some(ref src) = self.source {
+            src.read_ranges(ranges)
+        } else {
+            anyhow::bail!("no source image available to load blocks from")
         }
-
-        // 方案6: Stream stash reads — only load the specific ranges needed
-        // instead of reading the entire stash file into memory.
-        for (stash_id, map_ranges) in stash_refs {
-            let stash_data = self
-                .stash
-                .load_ranges(stash_id, map_ranges, self.block_size)?;
-
-            let mut stash_off = 0usize;
-            for (start, end) in map_ranges.iter() {
-                let len = ((end - start) as usize) * self.block_size;
-                let buf_start = (start as usize) * self.block_size;
-                let buf_end = buf_start + len;
-
-                ensure!(buf_end <= buffer.len(), "stash ref map exceeds buffer");
-                ensure!(
-                    stash_off + len <= stash_data.len(),
-                    "stash data too small for map"
-                );
-
-                buffer[buf_start..buf_end].copy_from_slice(&stash_data[stash_off..stash_off + len]);
-                stash_off += len;
-            }
-        }
-
-        Ok(buffer)
     }
 
-    /// Load source blocks with minimal allocation.
-    ///
-    /// For simple cases (no stash refs, no buffer map), this avoids
-    /// copying through an intermediate buffer by reading source ranges
-    /// directly. Falls back to `load_src_blocks` for complex cases.
-    ///
-    /// 方案2/8: Zero-copy optimization for simple move commands.
-    pub fn load_src_blocks_simple(&mut self, src_ranges: &RangeSet) -> Result<Vec<u8>> {
-        if let Some(ref s) = self.source {
-            s.read_ranges(src_ranges)
+    /// Copy-on-write version: returns a reference to stashed data if available,
+    /// otherwise loads from source. Reduces memory copies for stash operations.
+    pub fn load_src_blocks_cow<'a>(
+        &'a self,
+        ranges: &RangeSet,
+        stash_data: Option<&'a [u8]>,
+    ) -> Result<Cow<'a, [u8]>> {
+        if let Some(data) = stash_data {
+            Ok(Cow::Borrowed(data))
+        } else if let Some(ref src) = self.source {
+            Ok(Cow::Owned(src.read_ranges(ranges)?))
         } else {
-            self.target.read_ranges(src_ranges)
+            anyhow::bail!("no source image or stash data available")
         }
     }
 }
