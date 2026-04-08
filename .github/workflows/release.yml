@@ -25,19 +25,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          # Linux - 使用 musl 实现完全静态链接
+          - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             archive: tar.gz
-          - target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             archive: tar.gz
             cross: true
+          # macOS
           - target: x86_64-apple-darwin
             os: macos-latest
             archive: tar.gz
           - target: aarch64-apple-darwin
             os: macos-latest
             archive: tar.gz
+          # Windows - 静态链接 CRT
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             archive: zip
@@ -53,13 +56,19 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # For aarch64-unknown-linux-gnu cross-compilation
-      - name: Install cross-compilation tools
-        if: matrix.cross
+      # Linux musl 编译工具
+      - name: Install musl tools
+        if: endsWith(matrix.target, '-musl')
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          sudo apt-get install -y musl-tools
+
+      # aarch64 交叉编译链接器
+      - name: Install aarch64 cross compiler
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}

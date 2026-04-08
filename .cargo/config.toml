@@ -1,26 +1,58 @@
 # Build configuration for imgpatchtools-rs.
 #
-# Release builds produce a fully static ELF binary (static-pie)
-# with zero external shared-library dependencies.
+# Release builds produce fully static binaries
+# with zero external shared-library dependencies on all platforms.
 #
 # Usage:
-#   cargo build --release          → normal release (dynamic)
-#   cargo build-release-static     → fully static release binary
-#   cargo b-release-static         → same, shorter alias
-
-[alias]
-build-release-static = "rustc --release --bin imgpatchtools-rs -- -C target-feature=+crt-static"
-b-release-static = "rustc --release --bin imgpatchtools-rs -- -C target-feature=+crt-static"
+#   cargo build --release          → release build (platform-specific)
+#   cargo build --release --target x86_64-unknown-linux-musl  → Linux static
 
 [build]
 jobs = 8
 
+# ========== Linux - 完全静态链接 (musl) ==========
+[target.x86_64-unknown-linux-musl]
+linker = "musl-gcc"
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-self-contained=yes",
+    "-C", "link-arg=-static",
+]
+
+[target.aarch64-unknown-linux-musl]
+linker = "aarch64-linux-gnu-gcc"
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-self-contained=yes",
+    "-C", "link-arg=-static",
+]
+
+# ========== Windows - 静态链接 CRT ==========
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+]
+
+[target.i686-pc-windows-msvc]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+]
+
+# ========== macOS - 去除未使用代码 ==========
+# macOS 不支持完全静态链接，但启用 dead code stripping
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-dead_strip"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-dead_strip"]
+
+# ========== Profile 配置 ==========
 [profile.dev]
-opt-level = 3        # 开满优化
-debug = true        
+opt-level = 3
+debug = true
 debug-assertions = false
 overflow-checks = false
-lto = "thin"         # 或 "fat"
+lto = "thin"
 codegen-units = 16
 strip = "symbols"
-incremental = false  # 增量编译在这种配置下意义不大，还可能更慢
+incremental = false

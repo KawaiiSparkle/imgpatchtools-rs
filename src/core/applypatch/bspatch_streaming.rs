@@ -15,7 +15,7 @@ use anyhow::{ensure, Context, Result};
 use sha1::{Digest, Sha1};
 
 // 使用 libc 进行批量内存操作，匹配 C++ 性能
-extern "C" {
+unsafe extern "C" {
     fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8;
 }
 

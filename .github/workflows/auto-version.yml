@@ -22,39 +22,47 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Update Cargo.toml version and edition
+      - name: Update Cargo.toml version
         id: update
         run: |
+          # 设置时区为 UTC+8
+          export TZ="Asia/Shanghai"
+
           # 获取今天的日期 (YYYYMMDD)
           DATE=$(date +%Y%m%d)
 
-          # 计算今天第几次推送 (查询 git log 中今天的提交数)
-          PUSH_NUM=$(git log --oneline --since="$(date +%Y-%m-%d) 00:00:00" --until="$(date +%Y-%m-%d) 23:59:59" | wc -l)
+          # 计算今天第几次推送 (UTC+8, 查询 git log 中今天的提交数)
+          TODAY_START="$(date +%Y-%m-%d) 00:00:00"
+          TODAY_END="$(date +%Y-%m-%d) 23:59:59"
+          PUSH_NUM=$(git log --oneline --since="$TODAY_START" --until="$TODAY_END" | wc -l)
           PUSH_NUM=$((PUSH_NUM + 1))
 
-          # 新的 edition 格式: 日期-第几次推送
-          NEW_EDITION="${DATE}-${PUSH_NUM}"
+          # 限制到 99 次 (超过从 0.0 开始循环)
+          if [ $PUSH_NUM -gt 99 ]; then
+            PUSH_NUM=99
+          fi
 
-          # 获取当前 version 的 major 版本号
-          CURRENT_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"\([0-9]*\).*/\1/')
-          NEW_VERSION="$CURRENT_VERSION.0.0"
+          # 计算 minor 和 patch: 0.1 -> 9.9 对应第 1-99 次
+          MINOR=$(( (PUSH_NUM - 1) / 10 ))
+          PATCH=$(( (PUSH_NUM - 1) % 10 ))
 
-          echo "New edition: $NEW_EDITION"
+          # 新的 version 格式: MAJOR.MINOR.PATCH = 日期.X.Y
+          NEW_VERSION="${DATE}.${MINOR}.${PATCH}"
+
+          echo "Push number: $PUSH_NUM"
           echo "New version: $NEW_VERSION"
 
-          # 更新 Cargo.toml
-          sed -i "s/^edition = \"[^\"]*\"/edition = \"$NEW_EDITION\"/" Cargo.toml
+          # 更新 Cargo.toml (edition 保持 2024 不变)
           sed -i "s/^version = \"[^\"]*\"/version = \"$NEW_VERSION\"/" Cargo.toml
 
           # 输出变量供后续步骤使用
-          echo "edition=$NEW_EDITION" >> $GITHUB_OUTPUT
           echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
       - name: Commit and push changes
         run: |
           git add Cargo.toml
           git diff --cached --quiet || {
-            git commit -m "chore: auto update edition=${{ steps.update.outputs.edition }}, version=${{ steps.update.outputs.version }}"
+            git commit -m "chore: auto update version=${{ steps.update.outputs.version }}"
             git push
           }
 
@@ -65,7 +73,6 @@ jobs:
           tag_name: v${{ steps.update.outputs.version }}
           name: Release v${{ steps.update.outputs.version }}
           body: |
-            Edition: `${{ steps.update.outputs.edition }}`
             Auto-generated release
           draft: false
           prerelease: true

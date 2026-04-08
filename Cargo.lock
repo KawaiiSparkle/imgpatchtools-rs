@@ -195,6 +195,7 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f3a53fac24f34a81bc9954b5d6cfce0c21e18ec6959f44f56e8e90e4bb7c346c"
 dependencies = [
+ "bzip2-sys",
  "libbz2-rs-sys",
 ]
 
@@ -614,7 +615,7 @@ checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
 
 [[package]]
 name = "imgpatchtools-rs"
-version = "0.1.0"
+version = "20260409.1.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
