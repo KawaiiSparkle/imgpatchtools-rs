@@ -13,7 +13,7 @@ use std::path::Path;
 
 use anyhow::{ensure, Context, Result};
 
-use super::bspatch_raw;
+use super::bspatch_zero;
 use super::imgpatch;
 use super::types::{ApplyPatchError, FileContents, PatchType};
 use crate::util::hash;
@@ -171,7 +171,7 @@ fn target_already_correct(target_path: &Path, expected_sha1: &str) -> Result<boo
 /// Dispatch to the correct patcher based on detected type.
 fn apply_by_type(source: &[u8], patch: &[u8], patch_type: PatchType) -> Result<Vec<u8>> {
     match patch_type {
-        PatchType::Bsdiff => bspatch_raw::apply_bspatch_raw_vec(source, patch, 0),
+        PatchType::Bsdiff => bspatch_zero::apply_bspatch_zero_vec(source, patch, 0),
         PatchType::Imgdiff => imgpatch::apply_imgpatch(source, patch),
     }
 }

@@ -13,7 +13,7 @@
 //! | `GZIP`      | copy target gzip header → inflate → bsdiff → deflate →   |
 //! |             | copy target gzip footer                                   |
 
-use super::bspatch_raw;
+use super::bspatch_zero;
 use super::imgdiff_format::{
     parse_gzip_header_len, parse_imgdiff_patch, DeflateParams, ImgdiffChunk,
 };
@@ -32,7 +32,7 @@ use flate2::{Decompress, FlushDecompress};
 /// `ApplyImagePatch` behaviour).
 pub fn apply_imgpatch(source: &[u8], patch: &[u8]) -> Result<Vec<u8>> {
     if patch.len() < 8 || &patch[..7] != b"IMGDIFF" {
-        return bspatch_raw::apply_bspatch_raw_vec(source, patch, 0);
+        return bspatch_zero::apply_bspatch_zero_vec(source, patch, 0);
     }
 
     let (_num_chunks, chunks) = parse_imgdiff_patch(patch)?;
@@ -128,7 +128,7 @@ fn process_normal(
     let patch_offset_usize = patch_offset
         .try_into()
         .context("patch_offset too large for usize")?;
-    let patched = bspatch_raw::apply_bspatch_raw_vec(src_slice, patch, patch_offset_usize)
+    let patched = bspatch_zero::apply_bspatch_zero_vec(src_slice, patch, patch_offset_usize)
         .context("NORMAL chunk: bsdiff failed")?;
     output.extend_from_slice(&patched);
     Ok(())
@@ -182,7 +182,7 @@ fn process_deflate(
     let patch_offset_usize = patch_offset
         .try_into()
         .context("patch_offset too large for usize")?;
-    let patched = bspatch_raw::apply_bspatch_raw_vec(&inflated, patch, patch_offset_usize)
+    let patched = bspatch_zero::apply_bspatch_zero_vec(&inflated, patch, patch_offset_usize)
         .context("DEFLATE chunk: bsdiff")?;
 
     // 3. Recompress with the exact parameters from the patch.
@@ -238,7 +238,7 @@ fn process_gzip(
     let patch_offset_usize = patch_offset
         .try_into()
         .context("patch_offset too large for usize")?;
-    let patched = bspatch_raw::apply_bspatch_raw_vec(&inflated, patch, patch_offset_usize)
+    let patched = bspatch_zero::apply_bspatch_zero_vec(&inflated, patch, patch_offset_usize)
         .context("GZIP chunk: bsdiff")?;
 
     // 5. Recompress with the exact parameters recorded in the patch.

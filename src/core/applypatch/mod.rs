@@ -18,6 +18,7 @@ pub mod apply;
 pub mod bspatch;
 pub mod bspatch_raw;
 pub mod bspatch_streaming;
+pub mod bspatch_zero;
 pub mod cli;
 pub mod imgdiff_format;
 pub mod imgpatch;
