@@ -486,6 +486,11 @@ pub struct CommandContext {
     pub written_blocks: u64,
     pub progress: Box<dyn ProgressReporter>,
     pub blocks_advanced_this_cmd: u64,
+    
+    /// Reusable buffer for patch application output.
+    /// Eliminates per-command allocations by reusing the same Vec.
+    /// This matches C++ `CommandParameters.buffer` behavior.
+    pub(crate) reuse_buffer: Vec<u8>,
 }
 
 impl CommandContext {
@@ -511,7 +516,38 @@ impl CommandContext {
             written_blocks: 0,
             progress,
             blocks_advanced_this_cmd: 0,
+            reuse_buffer: Vec::new(),  // Start empty, will grow on first use
         }
+    }
+    
+    /// Get a reference to the reusable buffer, ensuring it has at least
+    /// `min_capacity` bytes available. The buffer is NOT zeroed - caller
+    /// must initialize contents before use.
+    ///
+    /// This matches C++ `allocate(size, buffer)` behavior.
+    pub fn get_reuse_buffer(&mut self, min_capacity: usize) -> &mut Vec<u8> {
+        if self.reuse_buffer.capacity() < min_capacity {
+            // Need to grow - reserve exact amount to avoid overallocation
+            self.reuse_buffer.reserve(min_capacity - self.reuse_buffer.capacity());
+        }
+        // Set len without initializing - caller must write all bytes
+        unsafe {
+            self.reuse_buffer.set_len(min_capacity);
+        }
+        &mut self.reuse_buffer
+    }
+    
+    /// Get the reusable buffer as a slice of the given size.
+    /// The buffer is cleared but capacity is preserved for reuse.
+    pub fn take_reuse_buffer(&mut self, size: usize) -> &mut [u8] {
+        self.reuse_buffer.clear();
+        if self.reuse_buffer.capacity() < size {
+            self.reuse_buffer.reserve(size - self.reuse_buffer.capacity());
+        }
+        unsafe {
+            self.reuse_buffer.set_len(size);
+        }
+        &mut self.reuse_buffer[..size]
     }
 
     /// Load source blocks into a contiguous buffer for patch application.

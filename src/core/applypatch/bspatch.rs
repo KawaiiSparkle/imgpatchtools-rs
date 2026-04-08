@@ -71,6 +71,49 @@ pub fn apply_bspatch_at(source: &[u8], patch: &[u8], patch_offset: usize) -> Res
 }
 
 // ---------------------------------------------------------------------------
+// Buffer-reuse API (matches C++ pattern)
+// ---------------------------------------------------------------------------
+
+/// Get the output size from patch header without applying.
+/// Useful for pre-allocating reusable buffers.
+pub fn get_output_size(patch: &[u8], patch_offset: usize) -> Result<usize> {
+    let header = parse_header(patch, patch_offset)?;
+    Ok(header.new_size)
+}
+
+/// Apply patch into a pre-allocated buffer.
+///
+/// The buffer must have at least `get_output_size()` bytes.
+/// This matches C++ `applypatch` behavior where output buffer is reused.
+pub fn apply_bspatch_into(
+    source: &[u8],
+    patch: &[u8],
+    patch_offset: usize,
+    output: &mut [u8],
+) -> Result<()> {
+    let header = parse_header(patch, patch_offset)?;
+    ensure!(
+        output.len() >= header.new_size,
+        "output buffer too small: {} < {}",
+        output.len(),
+        header.new_size
+    );
+
+    let payload = &patch[patch_offset + HEADER_SIZE..];
+    let ctrl_compressed = &payload[..header.ctrl_len];
+    let diff_compressed = &payload[header.ctrl_len..header.ctrl_len + header.diff_len];
+    let extra_compressed = &payload[header.ctrl_len + header.diff_len..];
+
+    apply_patch_stream_into(
+        source,
+        ctrl_compressed,
+        diff_compressed,
+        extra_compressed,
+        &mut output[..header.new_size],
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Header parsing
 // ---------------------------------------------------------------------------
 
@@ -145,11 +188,30 @@ fn apply_patch_stream(
     extra_compressed: &[u8],
     new_size: usize,
 ) -> Result<Vec<u8>> {
+    let mut output = vec![0u8; new_size];
+    apply_patch_stream_into(
+        source,
+        ctrl_compressed,
+        diff_compressed,
+        extra_compressed,
+        &mut output,
+    )?;
+    Ok(output)
+}
+
+/// Apply patch into pre-allocated output buffer (zero-allocation path).
+fn apply_patch_stream_into(
+    source: &[u8],
+    ctrl_compressed: &[u8],
+    diff_compressed: &[u8],
+    extra_compressed: &[u8],
+    output: &mut [u8],
+) -> Result<()> {
+    let new_size = output.len();
     let mut ctrl_stream = bzip2::read::BzDecoder::new(ctrl_compressed);
     let mut diff_stream = bzip2::read::BzDecoder::new(diff_compressed);
     let mut extra_stream = bzip2::read::BzDecoder::new(extra_compressed);
 
-    let mut output = vec![0u8; new_size];
     let old_size = source.len() as i64;
 
     // Cursor positions.
@@ -219,7 +281,148 @@ fn apply_patch_stream(
         old_pos += seek_adj;
     }
 
-    Ok(output)
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Streaming patch application (matches C++ SinkFn pattern)
+// ---------------------------------------------------------------------------
+
+/// Sink function type for streaming patch output.
+/// Matches C++ `SinkFn` signature: fn(data: &[u8]) -> Result<()>
+pub type SinkFn<'a> = &'a mut dyn FnMut(&[u8]) -> Result<()>;
+
+/// Apply a BSDIFF40 patch with streaming output.
+///
+/// This is the **performance-optimized path** that matches C++ `bspatch`
+/// behavior: output is streamed through `sink` callback instead of being
+/// collected into a Vec. Eliminates large buffer allocation.
+///
+/// # Arguments
+/// * `source` - Source data buffer
+/// * `patch` - Patch data buffer
+/// * `patch_offset` - Offset within patch where BSDIFF40 header starts
+/// * `sink` - Callback that receives output chunks (must write all data)
+///
+/// # Example
+/// ```ignore
+/// let mut output = Vec::new();
+/// apply_bspatch_stream(source, patch, 0, &mut |chunk| {
+///     output.extend_from_slice(chunk);
+///     Ok(())
+/// })?;
+/// ```
+pub fn apply_bspatch_stream(
+    source: &[u8],
+    patch: &[u8],
+    patch_offset: usize,
+    mut sink: SinkFn<'_>,
+) -> Result<()> {
+    let header = parse_header(patch, patch_offset)?;
+
+    let payload = &patch[patch_offset + HEADER_SIZE..];
+    let ctrl_compressed = &payload[..header.ctrl_len];
+    let diff_compressed = &payload[header.ctrl_len..header.ctrl_len + header.diff_len];
+    let extra_compressed = &payload[header.ctrl_len + header.diff_len..];
+
+    apply_patch_stream_sink(
+        source,
+        ctrl_compressed,
+        diff_compressed,
+        extra_compressed,
+        header.new_size,
+        &mut sink,
+    )
+}
+
+/// Internal: streaming patch application with sink.
+fn apply_patch_stream_sink(
+    source: &[u8],
+    ctrl_compressed: &[u8],
+    diff_compressed: &[u8],
+    extra_compressed: &[u8],
+    new_size: usize,
+    sink: &mut SinkFn<'_>,
+) -> Result<()> {
+    let mut ctrl_stream = bzip2::read::BzDecoder::new(ctrl_compressed);
+    let mut diff_stream = bzip2::read::BzDecoder::new(diff_compressed);
+    let mut extra_stream = bzip2::read::BzDecoder::new(extra_compressed);
+
+    let old_size = source.len() as i64;
+    let mut new_pos: usize = 0;
+    let mut old_pos: i64 = 0;
+    let mut ctrl_buf = [0u8; 24];
+
+    // Reusable output chunk for diff application (avoids per-iteration alloc)
+    let mut diff_chunk = vec![0u8; 64 * 1024];  // 64KB reusable buffer
+
+    while new_pos < new_size {
+        // Read control triple
+        ctrl_stream
+            .read_exact(&mut ctrl_buf)
+            .context("failed to read control tuple")?;
+
+        let add_len = offtin(&ctrl_buf[0..8]) as usize;
+        let copy_len = offtin(&ctrl_buf[8..16]) as usize;
+        let seek_adj = offtin(&ctrl_buf[16..24]);
+
+        // Apply diff in chunks using reusable buffer
+        let mut diff_remaining = add_len;
+        while diff_remaining > 0 {
+            let chunk_size = diff_remaining.min(diff_chunk.len());
+            
+            // Ensure buffer is large enough
+            if diff_chunk.len() < chunk_size {
+                diff_chunk.resize(chunk_size, 0);
+            }
+            
+            diff_stream
+                .read_exact(&mut diff_chunk[..chunk_size])
+                .context("failed to read diff data")?;
+
+            // Add source bytes (optimized: use pointer arithmetic)
+            for i in 0..chunk_size {
+                let src_idx = old_pos + i as i64;
+                let src_byte = if src_idx >= 0 && src_idx < old_size {
+                    source[src_idx as usize]
+                } else {
+                    0
+                };
+                diff_chunk[i] = diff_chunk[i].wrapping_add(src_byte);
+            }
+
+            sink(&diff_chunk[..chunk_size])
+                .context("sink failed during diff write")?;
+
+            diff_remaining -= chunk_size;
+            new_pos += chunk_size;
+            old_pos += chunk_size as i64;
+        }
+
+        // Copy extra data in chunks
+        let mut extra_remaining = copy_len;
+        while extra_remaining > 0 {
+            let chunk_size = extra_remaining.min(diff_chunk.len());
+            
+            if diff_chunk.len() < chunk_size {
+                diff_chunk.resize(chunk_size, 0);
+            }
+            
+            extra_stream
+                .read_exact(&mut diff_chunk[..chunk_size])
+                .context("failed to read extra data")?;
+
+            sink(&diff_chunk[..chunk_size])
+                .context("sink failed during extra write")?;
+
+            extra_remaining -= chunk_size;
+            new_pos += chunk_size;
+        }
+
+        old_pos += seek_adj;
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

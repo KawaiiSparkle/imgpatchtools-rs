@@ -61,6 +61,19 @@ impl BlockFile {
     pub fn total_blocks(&self) -> u64 {
         self.file_len / self.block_size as u64
     }
+    
+    /// Get mutable reference to underlying file for direct I/O.
+    /// 
+    /// # Safety
+    /// Caller must ensure proper seeking and block-aligned access.
+    pub fn file_mut(&mut self) -> &mut File {
+        &mut self.file
+    }
+    
+    /// Get block size
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
 
     /// Open an existing file for read/write access.
     pub fn open(path: &Path, block_size: usize) -> Result<Self> {

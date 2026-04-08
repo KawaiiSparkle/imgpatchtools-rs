@@ -56,6 +56,44 @@ pub fn sha256_hex(data: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Binary hash output (for efficient comparison, no heap allocation)
+// ---------------------------------------------------------------------------
+
+/// Compute the SHA-1 digest of `data` and return the raw 20-byte digest.
+///
+/// This avoids the overhead of hex encoding and String allocation,
+/// allowing direct `memcmp`-style comparison against expected hashes.
+#[inline]
+pub fn sha1_bytes(data: &[u8]) -> [u8; 20] {
+    let mut hasher = Sha1::new();
+    hasher.update(data);
+    hasher.finalize().into()
+}
+
+/// Compare SHA-1 hash of `data` against an expected raw digest.
+///
+/// Returns `true` if the hash matches, `false` otherwise.
+/// This is equivalent to C++ `memcmp(SHA1(...), expected, 20) == 0`.
+#[inline]
+pub fn sha1_compare(data: &[u8], expected: &[u8; 20]) -> bool {
+    sha1_bytes(data) == *expected
+}
+
+/// Parse a 40-character hex string into a 20-byte raw digest.
+///
+/// Returns `None` if the input is not valid hex or wrong length.
+pub fn parse_hex_digest(hex: &str) -> Option<[u8; 20]> {
+    if hex.len() != 40 {
+        return None;
+    }
+    let mut bytes = [0u8; 20];
+    for (i, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+        bytes[i] = u8::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
+    }
+    Some(bytes)
+}
+
+// ---------------------------------------------------------------------------
 // File hashers (memmap2)
 // ---------------------------------------------------------------------------
 
