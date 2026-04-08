@@ -83,6 +83,9 @@ pub fn block_image_update(
 
     ctx.stash.clear_all().context("failed to clean up stash")?;
     ctx.target.flush().context("failed to flush target image")?;
+    
+    // 报告多线程诊断信息
+    ctx.new_data.report_diagnostics();
 
     log::info!(
         "block_image_update complete: {} blocks written to {}",

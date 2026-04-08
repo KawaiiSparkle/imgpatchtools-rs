@@ -89,6 +89,12 @@ pub struct ParallelNewDataReader {
     pool: Arc<BufferPool>,
     /// Background thread handle.
     _thread_handle: Option<std::thread::JoinHandle<()>>,
+    /// 诊断信息：后台线程解压的总字节数
+    pub diag_bytes_decompressed: Arc<std::sync::atomic::AtomicU64>,
+    /// 诊断信息：队列满次数（后台线程等待）
+    pub diag_queue_full_count: Arc<std::sync::atomic::AtomicU64>,
+    /// 诊断信息：后台线程是否已完成
+    pub diag_thread_finished: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ParallelNewDataReader {
@@ -145,12 +151,26 @@ impl ParallelNewDataReader {
         let queue = Arc::new(ArrayQueue::<Vec<u8>>::new(NUM_POOL_BUFFERS));
         let pool_clone = Arc::clone(&pool);
         let queue_clone = Arc::clone(&queue);
+        
+        // 创建诊断统计
+        let diag_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let diag_full = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let diag_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let diag_bytes_clone = Arc::clone(&diag_bytes);
+        let diag_full_clone = Arc::clone(&diag_full);
+        let diag_finished_clone = Arc::clone(&diag_finished);
 
         // Spawn background thread for decompression
         let handle = thread::spawn(move || {
-            if let Err(e) = Self::decompressor_thread(file_path, ext, pool_clone, queue_clone) {
+            let result = Self::decompressor_thread_with_diag(
+                file_path, ext, pool_clone, queue_clone,
+                diag_bytes_clone, diag_full_clone
+            );
+            if let Err(e) = result {
                 log::error!("background decompressor thread failed: {}", e);
             }
+            diag_finished_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            log::debug!("background decompressor thread finished");
         });
 
         Ok(Self {
@@ -160,6 +180,9 @@ impl ParallelNewDataReader {
             total_received: 0,
             pool,
             _thread_handle: Some(handle),
+            diag_bytes_decompressed: diag_bytes,
+            diag_queue_full_count: diag_full,
+            diag_thread_finished: diag_finished,
         })
     }
 
@@ -229,6 +252,90 @@ impl ParallelNewDataReader {
         }
 
         log::debug!("background decompressor thread finished");
+        Ok(())
+    }
+    
+    /// 带诊断信息的后台线程版本
+    fn decompressor_thread_with_diag(
+        path: std::path::PathBuf,
+        ext: String,
+        pool: Arc<BufferPool>,
+        queue: Arc<ArrayQueue<Vec<u8>>>,
+        bytes_decompressed: Arc<std::sync::atomic::AtomicU64>,
+        queue_full_count: Arc<std::sync::atomic::AtomicU64>,
+    ) -> Result<()> {
+        let file = File::open(&path)?;
+
+        let mut reader: Box<dyn Read + Send> = match ext.as_str() {
+            "br" => {
+                log::info!(
+                    "background: using Brotli decompressor (buf={} KiB)",
+                    DECOMP_BUF_SIZE / 1024
+                );
+                Box::new(brotli::Decompressor::new(file, DECOMP_BUF_SIZE))
+            }
+            "lzma" | "xz" => {
+                log::info!(
+                    "background: using XZ/LZMA decompressor (buf={} KiB)",
+                    DECOMP_BUF_SIZE / 1024
+                );
+                Box::new(xz2::read::XzDecoder::new(
+                    std::io::BufReader::with_capacity(DECOMP_BUF_SIZE, file),
+                ))
+            }
+            _ => {
+                log::info!(
+                    "background: using raw file reader (buf={} KiB)",
+                    DECOMP_BUF_SIZE / 1024
+                );
+                Box::new(std::io::BufReader::with_capacity(DECOMP_BUF_SIZE, file))
+            }
+        };
+
+        // Read and send chunks using memory pool
+        let mut total_decompressed: u64 = 0;
+        let mut full_count: u64 = 0;
+        
+        loop {
+            let mut chunk = pool.acquire();
+            match reader.read(&mut chunk) {
+                Ok(0) => {
+                    pool.release(chunk);
+                    break;
+                }
+                Ok(n) => {
+                    chunk.truncate(n);
+                    total_decompressed += n as u64;
+                    
+                    // Spin-wait briefly if queue is full (backpressure)
+                    let mut retries = 0;
+                    while let Err(c) = queue.push(chunk) {
+                        chunk = c;
+                        full_count += 1;
+                        if retries > 1000 {
+                            log::error!("decompressor: queue full, dropping data");
+                            break;
+                        }
+                        std::thread::yield_now();
+                        retries += 1;
+                    }
+                }
+                Err(e) => {
+                    log::error!("background decompressor read error: {}", e);
+                    break;
+                }
+            }
+        }
+
+        // 更新诊断统计
+        bytes_decompressed.store(total_decompressed, std::sync::atomic::Ordering::SeqCst);
+        queue_full_count.store(full_count, std::sync::atomic::Ordering::SeqCst);
+        
+        log::info!(
+            "background thread stats: decompressed {} MB, queue full {} times",
+            total_decompressed / 1_048_576,
+            full_count
+        );
         Ok(())
     }
 
@@ -329,6 +436,33 @@ impl ParallelNewDataReader {
     /// Get total bytes received so far.
     pub fn bytes_received(&self) -> usize {
         self.total_received
+    }
+    
+    /// 打印多线程诊断报告
+    pub fn report_diagnostics(&self) {
+        let decompressed = self.diag_bytes_decompressed.load(std::sync::atomic::Ordering::SeqCst);
+        let full_count = self.diag_queue_full_count.load(std::sync::atomic::Ordering::SeqCst);
+        let finished = self.diag_thread_finished.load(std::sync::atomic::Ordering::SeqCst);
+        
+        log::info!("=== ParallelNewDataReader 诊断报告 ===");
+        log::info!("后台线程状态: {}", if finished { "已完成" } else { "运行中" });
+        log::info!("后台解压字节数: {} ({} MB)", decompressed, decompressed / 1_048_576);
+        log::info!("主线程消费字节数: {} ({} MB)", self.total_received, self.total_received / 1_048_576);
+        log::info!("队列满次数 (后台等待): {}", full_count);
+        
+        if decompressed > 0 {
+            let ratio = (self.total_received as f64) / (decompressed as f64);
+            log::info!("消费/解压比例: {:.2}%", ratio * 100.0);
+        }
+        
+        if finished && decompressed == self.total_received as u64 {
+            log::info!("✓ 多线程工作正常：所有解压数据已被消费");
+        } else if finished && decompressed != self.total_received as u64 {
+            log::warn!("✗ 数据不匹配：解压 {} MB，消费 {} MB", 
+                decompressed / 1_048_576, self.total_received / 1_048_576);
+        } else {
+            log::info!("? 后台线程仍在运行或尚未完成");
+        }
     }
 }
 
