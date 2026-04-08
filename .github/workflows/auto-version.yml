@@ -1,0 +1,71 @@
+name: Auto Version & Edition
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Update Cargo.toml version and edition
+        id: update
+        run: |
+          # 获取今天的日期 (YYYYMMDD)
+          DATE=$(date +%Y%m%d)
+
+          # 计算今天第几次推送 (查询 git log 中今天的提交数)
+          PUSH_NUM=$(git log --oneline --since="$(date +%Y-%m-%d) 00:00:00" --until="$(date +%Y-%m-%d) 23:59:59" | wc -l)
+          PUSH_NUM=$((PUSH_NUM + 1))
+
+          # 新的 edition 格式: 日期-第几次推送
+          NEW_EDITION="${DATE}-${PUSH_NUM}"
+
+          # 获取当前 version 的 major 版本号
+          CURRENT_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"\([0-9]*\).*/\1/')
+          NEW_VERSION="$CURRENT_VERSION.0.0"
+
+          echo "New edition: $NEW_EDITION"
+          echo "New version: $NEW_VERSION"
+
+          # 更新 Cargo.toml
+          sed -i "s/^edition = \"[^\"]*\"/edition = \"$NEW_EDITION\"/" Cargo.toml
+          sed -i "s/^version = \"[^\"]*\"/version = \"$NEW_VERSION\"/" Cargo.toml
+
+          # 输出变量供后续步骤使用
+          echo "edition=$NEW_EDITION" >> $GITHUB_OUTPUT
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Commit and push changes
+        run: |
+          git add Cargo.toml
+          git diff --cached --quiet || {
+            git commit -m "chore: auto update edition=${{ steps.update.outputs.edition }}, version=${{ steps.update.outputs.version }}"
+            git push
+          }
+
+      - name: Create GitHub Release (optional)
+        if: false  # 设置为 true 启用自动 release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.update.outputs.version }}
+          name: Release v${{ steps.update.outputs.version }}
+          body: |
+            Edition: `${{ steps.update.outputs.edition }}`
+            Auto-generated release
+          draft: false
+          prerelease: true
