@@ -12,9 +12,11 @@
 //! | [`move_cmd`]    | `move`                 |
 //! | [`diff_bsdiff`] | `bsdiff`               |
 //! | [`diff_imgdiff`]| `imgdiff`              |
+//! | [`hash_tree`]   | `compute_hash_tree`    |
 
 mod diff_bsdiff;
 mod diff_imgdiff;
+mod hash_tree;
 pub(crate) mod move_cmd;
 mod new_cmd;
 mod stash_free;
@@ -23,6 +25,7 @@ mod zero_erase;
 // Re-export all command handlers for the registry.
 pub use diff_bsdiff::cmd_bsdiff;
 pub use diff_imgdiff::cmd_imgdiff;
+pub use hash_tree::cmd_compute_hash_tree;
 pub use move_cmd::cmd_move;
 pub use new_cmd::cmd_new;
 pub use stash_free::{cmd_free, cmd_stash};

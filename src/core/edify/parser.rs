@@ -1,6 +1,6 @@
 //! Edify script parser — produces an AST from the OTA updater-script language.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 // ---------------------------------------------------------------------------
 // AST
@@ -369,7 +369,12 @@ fn find_update_script() -> Result<std::path::PathBuf> {
     }
 
     // Try META-INF/com/google/android/
-    let script_in_meta = current_dir.join("META-INF").join("com").join("google").join("android").join("update-script");
+    let script_in_meta = current_dir
+        .join("META-INF")
+        .join("com")
+        .join("google")
+        .join("android")
+        .join("update-script");
     if script_in_meta.exists() {
         return Ok(script_in_meta);
     }
@@ -410,21 +415,23 @@ pub fn read_range_sha1_info_from_script(partition_name: &str) -> Result<RangeSha
     find_range_sha1_info_in_text(&content, partition_name)
 }
 
-/// Extract range_sha1 ranges from AST expression
-fn extract_range_sha1_from_expr(expr: &Expr, partition_name: &str) -> Option<String> {
-    extract_range_sha1_info_from_expr(expr, partition_name).map(|info| info.ranges)
-}
-
 /// Extract range_sha1 info (ranges + expected SHA1) from AST expression
 fn extract_range_sha1_info_from_expr(expr: &Expr, partition_name: &str) -> Option<RangeSha1Info> {
     match expr {
         // Handle: range_sha1("path", "ranges") == "expected_sha1" or "expected_sha1" == range_sha1("path", "ranges")
-        Expr::BinaryOp { op: BinaryOperator::Eq, lhs, rhs } => {
+        Expr::BinaryOp {
+            op: BinaryOperator::Eq,
+            lhs,
+            rhs,
+        } => {
             // Check if lhs is range_sha1 call
-            if let Expr::FunctionCall { name, args } = lhs.as_ref() {
-                if name == "range_sha1" && args.len() >= 2 {
-                    if let (Expr::StringLiteral(path), Expr::StringLiteral(ranges)) = (&args[0], &args[1]) {
-                        if path.contains(partition_name) || path.contains(&partition_name.replace("_", "/")) {
+            if let Expr::FunctionCall { name, args } = lhs.as_ref()
+                && name == "range_sha1" && args.len() >= 2
+                    && let (Expr::StringLiteral(path), Expr::StringLiteral(ranges)) =
+                        (&args[0], &args[1])
+                        && (path.contains(partition_name)
+                            || path.contains(&partition_name.replace("_", "/")))
+                        {
                             // Get expected SHA1 from rhs
                             let expected_sha1 = match rhs.as_ref() {
                                 Expr::StringLiteral(s) => Some(s.clone()),
@@ -435,14 +442,14 @@ fn extract_range_sha1_info_from_expr(expr: &Expr, partition_name: &str) -> Optio
                                 expected_sha1,
                             });
                         }
-                    }
-                }
-            }
             // Check if rhs is range_sha1 call (reverse order)
-            if let Expr::FunctionCall { name, args } = rhs.as_ref() {
-                if name == "range_sha1" && args.len() >= 2 {
-                    if let (Expr::StringLiteral(path), Expr::StringLiteral(ranges)) = (&args[0], &args[1]) {
-                        if path.contains(partition_name) || path.contains(&partition_name.replace("_", "/")) {
+            if let Expr::FunctionCall { name, args } = rhs.as_ref()
+                && name == "range_sha1" && args.len() >= 2
+                    && let (Expr::StringLiteral(path), Expr::StringLiteral(ranges)) =
+                        (&args[0], &args[1])
+                        && (path.contains(partition_name)
+                            || path.contains(&partition_name.replace("_", "/")))
+                        {
                             let expected_sha1 = match lhs.as_ref() {
                                 Expr::StringLiteral(s) => Some(s.clone()),
                                 _ => None,
@@ -452,25 +459,23 @@ fn extract_range_sha1_info_from_expr(expr: &Expr, partition_name: &str) -> Optio
                                 expected_sha1,
                             });
                         }
-                    }
-                }
-            }
             // Try searching in both sides recursively
             extract_range_sha1_info_from_expr(lhs, partition_name)
                 .or_else(|| extract_range_sha1_info_from_expr(rhs, partition_name))
         }
         // Handle standalone range_sha1 call (without comparison)
         Expr::FunctionCall { name, args } if name == "range_sha1" => {
-            if args.len() >= 2 {
-                if let (Expr::StringLiteral(path), Expr::StringLiteral(ranges)) = (&args[0], &args[1]) {
-                    if path.contains(partition_name) || path.contains(&partition_name.replace("_", "/")) {
+            if args.len() >= 2
+                && let (Expr::StringLiteral(path), Expr::StringLiteral(ranges)) =
+                    (&args[0], &args[1])
+                    && (path.contains(partition_name)
+                        || path.contains(&partition_name.replace("_", "/")))
+                    {
                         return Some(RangeSha1Info {
                             ranges: ranges.clone(),
                             expected_sha1: None,
                         });
                     }
-                }
-            }
             None
         }
         Expr::Sequence(exprs) => {
@@ -481,15 +486,18 @@ fn extract_range_sha1_info_from_expr(expr: &Expr, partition_name: &str) -> Optio
             }
             None
         }
-        Expr::If { condition: _, then, else_ } => {
+        Expr::If {
+            condition: _,
+            then,
+            else_,
+        } => {
             if let Some(info) = extract_range_sha1_info_from_expr(then, partition_name) {
                 return Some(info);
             }
-            if let Some(else_expr) = else_ {
-                if let Some(info) = extract_range_sha1_info_from_expr(else_expr, partition_name) {
+            if let Some(else_expr) = else_
+                && let Some(info) = extract_range_sha1_info_from_expr(else_expr, partition_name) {
                     return Some(info);
                 }
-            }
             None
         }
         Expr::BinaryOp { op: _, lhs, rhs } => {
@@ -500,19 +508,10 @@ fn extract_range_sha1_info_from_expr(expr: &Expr, partition_name: &str) -> Optio
     }
 }
 
-/// Fallback: find range_sha1 in text using simple pattern matching
-fn find_range_sha1_in_text(content: &str, partition_name: &str) -> Result<String> {
-    let info = find_range_sha1_info_in_text(content, partition_name)?;
-    Ok(info.ranges)
-}
-
 /// Fallback: find range_sha1 info (ranges + expected SHA1) in text using simple pattern matching
 fn find_range_sha1_info_in_text(content: &str, partition_name: &str) -> Result<RangeSha1Info> {
     // Try various partition name formats
-    let patterns = vec![
-        partition_name.to_string(),
-        partition_name.replace("_", "/"),
-    ];
+    let patterns = vec![partition_name.to_string(), partition_name.replace("_", "/")];
 
     for line in content.lines() {
         let line = line.trim();
@@ -521,8 +520,8 @@ fn find_range_sha1_info_in_text(content: &str, partition_name: &str) -> Result<R
                 if line.contains(pattern) {
                     // Try to extract ranges and expected SHA1
                     // Pattern: range_sha1("path", "ranges") == "sha1" or range_sha1("path", "ranges") == "sha1"
-                    if let Some(start) = line.find("range_sha1(") {
-                        if let Some(args_start) = line[start..].find('"') {
+                    if let Some(start) = line.find("range_sha1(")
+                        && let Some(args_start) = line[start..].find('"') {
                             let after_first = &line[start + args_start + 1..];
                             if let Some(second_quote) = after_first.find('"') {
                                 let after_path = &after_first[second_quote + 1..];
@@ -530,13 +529,18 @@ fn find_range_sha1_info_in_text(content: &str, partition_name: &str) -> Result<R
                                     let after_comma = &after_path[comma + 1..].trim();
                                     if after_comma.starts_with('"') {
                                         let ranges_start = 1;
-                                        if let Some(ranges_end) = after_comma[ranges_start..].find('"') {
-                                            let ranges = after_comma[ranges_start..ranges_start + ranges_end].to_string();
-                                            
+                                        if let Some(ranges_end) =
+                                            after_comma[ranges_start..].find('"')
+                                        {
+                                            let ranges = after_comma
+                                                [ranges_start..ranges_start + ranges_end]
+                                                .to_string();
+
                                             // Try to find expected SHA1 after the closing paren
-                                            let after_call = &after_comma[ranges_start + ranges_end + 1..];
+                                            let after_call =
+                                                &after_comma[ranges_start + ranges_end + 1..];
                                             let expected_sha1 = extract_expected_sha1(after_call);
-                                            
+
                                             return Ok(RangeSha1Info {
                                                 ranges,
                                                 expected_sha1,
@@ -546,13 +550,15 @@ fn find_range_sha1_info_in_text(content: &str, partition_name: &str) -> Result<R
                                 }
                             }
                         }
-                    }
                 }
             }
         }
     }
 
-    anyhow::bail!("range_sha1 ranges not found for partition: {}", partition_name)
+    anyhow::bail!(
+        "range_sha1 ranges not found for partition: {}",
+        partition_name
+    )
 }
 
 /// Extract expected SHA1 from the text after range_sha1() call

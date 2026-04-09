@@ -1,7 +1,7 @@
 //! Parser for `dynamic_partitions_op_list`.
 //! Format stable from Android 10 through 16.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 #[derive(Debug, Clone)]
 pub struct GroupState {

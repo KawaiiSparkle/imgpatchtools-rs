@@ -12,8 +12,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 
 use super::lp_metadata::{
-    LpMetadata, LP_METADATA_GEOMETRY_SIZE, LP_PARTITION_RESERVED_BYTES, LP_SECTOR_SIZE,
-    LP_TARGET_TYPE_LINEAR,
+    LP_METADATA_GEOMETRY_SIZE, LP_PARTITION_RESERVED_BYTES, LP_SECTOR_SIZE, LP_TARGET_TYPE_LINEAR,
+    LpMetadata,
 };
 use super::sparse;
 

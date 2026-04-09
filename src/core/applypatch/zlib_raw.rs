@@ -4,7 +4,7 @@
 //! bit-exact recompression of AOSP imgdiff chunks requires calling zlib
 //! directly through `libz-sys`.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use libz_sys as zlib;
 use std::mem::MaybeUninit;
 
@@ -28,10 +28,10 @@ const Z_DEFLATED: i32 = 8;
 ///
 /// * `level`       – 0–9 or -1 (treated as 6, zlib default).
 /// * `window_bits` – The value **as stored in the patch**. AOSP imgdiff stores
-///                   the positive absolute value (e.g. 15). Some older OTA
-///                   generators store the already-negated value (e.g. -15).
-///                   Both cases are handled: we always end up passing a
-///                   negative value in the range [-8, -15] to `deflateInit2`.
+///   the positive absolute value (e.g. 15). Some older OTA
+///   generators store the already-negated value (e.g. -15).
+///   Both cases are handled: we always end up passing a
+///   negative value in the range [-8, -15] to `deflateInit2`.
 /// * `mem_level`   – 1–9.
 /// * `strategy`    – 0–4.
 pub fn deflate_raw_exact(
@@ -87,16 +87,18 @@ unsafe fn deflate_raw_unsafe(
     let mut strm = MaybeUninit::<zlib::z_stream>::zeroed();
     let strm_ptr = strm.as_mut_ptr();
 
-    let ret = zlib::deflateInit2_(
-        strm_ptr,
-        level,
-        Z_DEFLATED,
-        raw_window_bits,
-        mem_level,
-        strategy,
-        zlib::zlibVersion(),
-        std::mem::size_of::<zlib::z_stream>() as i32,
-    );
+    let ret = unsafe {
+        zlib::deflateInit2_(
+            strm_ptr,
+            level,
+            Z_DEFLATED,
+            raw_window_bits,
+            mem_level,
+            strategy,
+            zlib::zlibVersion(),
+            std::mem::size_of::<zlib::z_stream>() as i32,
+        )
+    };
 
     if ret != Z_OK {
         bail!(
@@ -105,10 +107,10 @@ unsafe fn deflate_raw_unsafe(
         );
     }
 
-    let strm = strm.assume_init_mut();
+    let strm = unsafe { strm.assume_init_mut() };
 
     // ---- Allocate output buffer (deflateBound gives worst-case size) --------
-    let bound = zlib::deflateBound(strm, data.len() as zlib::uLong) as usize;
+    let bound = unsafe { zlib::deflateBound(strm, data.len() as zlib::uLong) as usize };
     let mut output = vec![0u8; bound];
 
     strm.next_in = data.as_ptr() as *mut u8;
@@ -116,9 +118,9 @@ unsafe fn deflate_raw_unsafe(
     strm.next_out = output.as_mut_ptr();
     strm.avail_out = output.len() as zlib::uInt;
 
-    let ret = zlib::deflate(strm, Z_FINISH);
+    let ret = unsafe { zlib::deflate(strm, Z_FINISH) };
     let produced = strm.total_out as usize;
-    zlib::deflateEnd(strm);
+    unsafe { zlib::deflateEnd(strm) };
 
     if ret != Z_STREAM_END {
         bail!(

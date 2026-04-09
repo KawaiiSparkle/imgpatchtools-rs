@@ -39,7 +39,10 @@ fn detect_partition_files(partition_name: &str) -> Result<(PathBuf, PathBuf, Pat
     } else if new_data.exists() {
         new_data
     } else {
-        anyhow::bail!("New data file not found for partition: {} (tried .new.dat.br, .new.dat.lzma, .new.dat)", partition_name);
+        anyhow::bail!(
+            "New data file not found for partition: {} (tried .new.dat.br, .new.dat.lzma, .new.dat)",
+            partition_name
+        );
     };
 
     // Patch data file
@@ -209,8 +212,13 @@ pub fn run(args: &BlockimgArgs, verbose: bool) -> Result<()> {
                 Some(r) => (r.clone(), None),
                 None => {
                     let partition_name = extract_partition_name(file);
-                    log::info!("Reading ranges from update-script for partition: {}", partition_name);
-                    let info = crate::core::edify::parser::read_range_sha1_info_from_script(&partition_name)?;
+                    log::info!(
+                        "Reading ranges from update-script for partition: {}",
+                        partition_name
+                    );
+                    let info = crate::core::edify::parser::read_range_sha1_info_from_script(
+                        &partition_name,
+                    )?;
                     (info.ranges, info.expected_sha1)
                 }
             };
@@ -228,12 +236,12 @@ pub fn run(args: &BlockimgArgs, verbose: bool) -> Result<()> {
                 }
             };
 
-            let computed_sha1 =
-                update::range_sha1(&file_path, &ranges, *block_size).context("range_sha1 failed")?;
-            
+            let computed_sha1 = update::range_sha1(&file_path, &ranges, *block_size)
+                .context("range_sha1 failed")?;
+
             // Print the computed SHA1
             println!("Computed: {}", computed_sha1);
-            
+
             // If expected SHA1 is available (from update-script), compare and show result
             if let Some(expected) = expected_sha1 {
                 println!("Expected: {}", expected);
@@ -243,7 +251,7 @@ pub fn run(args: &BlockimgArgs, verbose: bool) -> Result<()> {
                     println!("Result: MISMATCH ✗");
                 }
             }
-            
+
             Ok(())
         }
     }

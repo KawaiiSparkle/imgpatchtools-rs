@@ -7,7 +7,7 @@
 //!
 //! Reference: `system/core/libsparse/sparse_format.h` in AOSP.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::io::Write;
 
 // ---------------------------------------------------------------------------
@@ -23,6 +23,48 @@ pub const CHUNK_HEADER_SIZE: u16 = 12;
 pub const CHUNK_TYPE_RAW: u16 = 0xCAC1;
 pub const CHUNK_TYPE_FILL: u16 = 0xCAC2;
 pub const CHUNK_TYPE_DONT_CARE: u16 = 0xCAC3;
+
+// ---------------------------------------------------------------------------
+// Sparse Header parsing (for detection)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy)]
+pub struct SparseHeader {
+    pub magic: u32,
+    pub major_version: u16,
+    pub minor_version: u16,
+    pub file_header_size: u16,
+    pub chunk_header_size: u16,
+    pub block_size: u32,
+    pub total_blocks: u32,
+    pub total_chunks: u32,
+    pub image_checksum: u32,
+}
+
+impl SparseHeader {
+    pub fn from_bytes(data: &[u8]) -> Result<Self> {
+        if data.len() < 28 {
+            bail!("Sparse header too short: {} bytes", data.len());
+        }
+
+        let magic = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        if magic != SPARSE_HEADER_MAGIC {
+            bail!("Invalid sparse magic: {:08x}", magic);
+        }
+
+        Ok(Self {
+            magic,
+            major_version: u16::from_le_bytes([data[4], data[5]]),
+            minor_version: u16::from_le_bytes([data[6], data[7]]),
+            file_header_size: u16::from_le_bytes([data[8], data[9]]),
+            chunk_header_size: u16::from_le_bytes([data[10], data[11]]),
+            block_size: u32::from_le_bytes([data[12], data[13], data[14], data[15]]),
+            total_blocks: u32::from_le_bytes([data[16], data[17], data[18], data[19]]),
+            total_chunks: u32::from_le_bytes([data[20], data[21], data[22], data[23]]),
+            image_checksum: u32::from_le_bytes([data[24], data[25], data[26], data[27]]),
+        })
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Header serialization

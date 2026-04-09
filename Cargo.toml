@@ -6,9 +6,6 @@ authors = ["KawaiiSparkle"]
 description = "Rust reimplementation of Android imgpatchtools"
 license = "GPL-3.0"
 
-[build]
-jobs = 8
-
 [profile.dev]
 codegen-units = 16
 opt-level = 3

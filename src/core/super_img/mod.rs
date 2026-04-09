@@ -4,6 +4,7 @@
 
 pub mod builder;
 pub mod cli;
+pub mod detector;
 pub mod lp_metadata;
 pub mod op_list;
 pub mod reader;

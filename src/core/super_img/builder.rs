@@ -1,7 +1,7 @@
 //! Metadata builder — constructs LP metadata from a config, allocates extents,
 //! computes all checksums. Version-aware (v1.0 / v1.1 / v1.2).
 
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
@@ -289,9 +289,209 @@ fn align_up(v: u64, a: u64) -> u64 {
         return v;
     }
     let r = v % a;
-    if r == 0 {
-        v
-    } else {
-        v + (a - r)
+    if r == 0 { v } else { v + (a - r) }
+}
+
+// ---------------------------------------------------------------------------
+// Smart builder with automatic version detection (RAW format only)
+// ---------------------------------------------------------------------------
+
+use super::detector::{LpVersionInfo, SuperImageProfile};
+
+/// Smart super image creation configuration with auto-detection
+#[derive(Debug, Clone)]
+pub struct SmartSuperConfig {
+    pub profile: SuperImageProfile,
+    pub partitions: Vec<PartitionInfo>,
+    pub groups: Vec<GroupInfo>,
+    pub device_size: Option<u64>, // Auto-calculate if None
+}
+
+/// Build super image with automatic version detection
+///
+/// This is the main entry point for FOTA-to-full conversion.
+/// It automatically:
+/// 1. Detects LP version from update-binary or existing super.img
+/// 2. Creates metadata with correct version and flags
+/// 3. Returns metadata ready for writing in RAW format
+///
+/// NOTE: Output is always RAW format. Sparse images are not supported.
+pub fn build_super_smart(config: &SmartSuperConfig) -> Result<LpMetadata> {
+    let version = config.profile.lp_version;
+
+    log::info!(
+        "Building super image: version={} (RAW format only)",
+        version
+    );
+
+    // Determine LP version enum
+    let lp_version = match (version.major, version.minor) {
+        (10, 0) => LpVersion::V1_0,
+        (10, 1) => LpVersion::V1_1,
+        (10, 2) => LpVersion::V1_2,
+        _ => {
+            log::warn!(
+                "Unknown LP version v{}.{}, using v1.0",
+                version.major,
+                version.minor
+            );
+            LpVersion::V1_0
+        }
+    };
+
+    // Determine header flags
+    let mut header_flags = 0u32;
+    if version.supports_virtual_ab() {
+        header_flags |= LP_HEADER_FLAG_VIRTUAL_AB_DEVICE;
+        log::info!("Enabling Virtual A/B flag (v10.2+)");
     }
+
+    // Use geometry from detection if available
+    let (metadata_max_size, metadata_slots) = if let Some(ref geom) = config.profile.geometry {
+        (geom.metadata_max_size, geom.metadata_slot_count)
+    } else {
+        (65536u32, 2u32) // Default
+    };
+
+    // Calculate device size
+    let device_size = config.device_size.unwrap_or_else(|| {
+        let temp_config = SuperConfig {
+            device_size: 0,
+            metadata_max_size,
+            metadata_slots,
+            block_device_name: "super".into(),
+            alignment: LP_DEFAULT_ALIGNMENT,
+            alignment_offset: 0,
+            logical_block_size: 4096,
+            groups: config.groups.clone(),
+            partitions: config.partitions.clone(),
+            version: lp_version,
+            header_flags,
+        };
+        auto_device_size(&temp_config)
+    });
+
+    let super_config = SuperConfig {
+        device_size,
+        metadata_max_size,
+        metadata_slots,
+        block_device_name: "super".into(),
+        alignment: LP_DEFAULT_ALIGNMENT,
+        alignment_offset: 0,
+        logical_block_size: 4096,
+        groups: config.groups.clone(),
+        partitions: config.partitions.clone(),
+        version: lp_version,
+        header_flags,
+    };
+
+    build_metadata(&super_config)
+}
+
+/// Build super with manually specified LP version (recommended)
+///
+/// # Arguments
+/// * `op_list_path` - Path to dynamic_partitions_op_list
+/// * `lp_version` - Manually specified LP version (e.g., (10, 0) for v10.0)
+/// * `geometry` - Optional geometry from lpdump (auto-detect if None)
+pub fn build_super_with_version(
+    op_list_path: &std::path::Path,
+    lp_version: LpVersionInfo,
+    geometry: Option<LpMetadataGeometry>,
+) -> Result<LpMetadata> {
+    use super::op_list::parse_op_list;
+
+    log::info!(
+        "Building super image with manual version: {} (RAW format)",
+        lp_version
+    );
+
+    let profile = SuperImageProfile {
+        lp_version,
+        geometry,
+        detection_source: super::detector::DetectionSource::Default,
+    };
+
+    // Parse op_list to get partitions and groups
+    let op_state = parse_op_list(&std::fs::read_to_string(op_list_path)?)?;
+
+    let groups: Vec<GroupInfo> = op_state
+        .groups
+        .into_iter()
+        .map(|g| GroupInfo {
+            name: g.name,
+            max_size: g.max_size,
+        })
+        .collect();
+
+    let partitions: Vec<PartitionInfo> = op_state
+        .partitions
+        .into_iter()
+        .map(|p| PartitionInfo {
+            name: p.name,
+            group_name: p.group_name,
+            attributes: 0,
+            size: p.size,
+        })
+        .collect();
+
+    let config = SmartSuperConfig {
+        profile,
+        partitions,
+        groups,
+        device_size: None,
+    };
+
+    build_super_smart(&config)
+}
+
+/// Convenience function: build super from op_list with auto-detection
+///
+/// NOTE: Detection is best-effort. For reliable results, use build_super_with_version()
+/// with manually specified version from lpdump output.
+pub fn build_super_from_op_list(
+    op_list_path: &std::path::Path,
+    update_binary: Option<&std::path::Path>,
+    existing_super: Option<&std::path::Path>,
+) -> Result<LpMetadata> {
+    use super::detector::detect_super_profile;
+    use super::op_list::parse_op_list;
+
+    // Detect profile from available sources
+    let profile = detect_super_profile(update_binary, existing_super, Some(op_list_path))?;
+
+    log::warn!("Using auto-detected LP version: {}", profile.lp_version);
+    log::warn!("For reliable results, use --lp-version to manually specify version from lpdump");
+
+    // Parse op_list to get partitions and groups
+    let op_state = parse_op_list(&std::fs::read_to_string(op_list_path)?)?;
+
+    let groups: Vec<GroupInfo> = op_state
+        .groups
+        .into_iter()
+        .map(|g| GroupInfo {
+            name: g.name,
+            max_size: g.max_size,
+        })
+        .collect();
+
+    let partitions: Vec<PartitionInfo> = op_state
+        .partitions
+        .into_iter()
+        .map(|p| PartitionInfo {
+            name: p.name,
+            group_name: p.group_name,
+            attributes: 0,
+            size: p.size,
+        })
+        .collect();
+
+    let config = SmartSuperConfig {
+        profile,
+        partitions,
+        groups,
+        device_size: None,
+    };
+
+    build_super_smart(&config)
 }

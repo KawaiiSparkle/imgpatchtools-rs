@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
 
 use crate::core::blockimg::context::CommandContext;
@@ -49,6 +49,7 @@ pub fn builtin_registry() -> CommandRegistry {
     r.register("imgdiff", ops::cmd_imgdiff as CommandFn);
     r.register("stash", ops::cmd_stash as CommandFn);
     r.register("free", ops::cmd_free as CommandFn);
+    r.register("compute_hash_tree", ops::cmd_compute_hash_tree as CommandFn);
 
     r
 }

@@ -11,7 +11,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 
 use super::bspatch_zero;
 use super::imgpatch;

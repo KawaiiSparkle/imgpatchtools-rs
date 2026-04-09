@@ -8,7 +8,7 @@ use crate::core::applypatch::imgpatch;
 use crate::core::blockimg::context::CommandContext;
 use crate::core::blockimg::transfer_list::TransferCommand;
 use crate::util::hash;
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 
 pub fn cmd_imgdiff(ctx: &mut CommandContext, cmd: &TransferCommand) -> Result<()> {
     let target_ranges = cmd
@@ -17,7 +17,7 @@ pub fn cmd_imgdiff(ctx: &mut CommandContext, cmd: &TransferCommand) -> Result<()
         .context("imgdiff: missing target_ranges")?;
     let patch_offset = cmd.patch_offset.context("imgdiff: missing patch_offset")?;
     let patch_len = cmd.patch_len.context("imgdiff: missing patch_len")?;
-    
+
     // Get source ranges - required for imgdiff
     let src_ranges = cmd
         .src_ranges
@@ -44,10 +44,10 @@ pub fn cmd_imgdiff(ctx: &mut CommandContext, cmd: &TransferCommand) -> Result<()
         }
     }
 
-    // Step 2: Load source blocks (corrected: provide empty stash_map as 2nd arg)
-    let empty_stash_map = std::collections::HashMap::new();
-    let src_data = ctx.load_src_blocks(src_ranges, &empty_stash_map)?;
-    
+    // Step 2: Load source blocks (支持 stash refs，容错加载)
+    let src_data =
+        ctx.load_src_blocks(src_ranges, &cmd.src_stash_refs, cmd.src_buffer_map.as_ref())?;
+
     // Step 3: Verify source hash
     if let Some(ref expected_src_hash) = cmd.src_hash {
         let actual_src_hash = hash::sha1_hex(&src_data);
@@ -79,12 +79,12 @@ pub fn cmd_imgdiff(ctx: &mut CommandContext, cmd: &TransferCommand) -> Result<()
 
     ctx.written_blocks += target_ranges.blocks();
     ctx.blocks_advanced_this_cmd = target_ranges.blocks();
-    
+
     log::debug!(
         "imgdiff: patched {} blocks (total written: {})",
         target_ranges.blocks(),
         ctx.written_blocks
     );
-    
+
     Ok(())
 }

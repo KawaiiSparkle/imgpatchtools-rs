@@ -41,7 +41,7 @@
 //!     +N   gzip_footer     [8 bytes]
 //! ```
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use byteorder::{ByteOrder, LittleEndian};
 
 // ---------------------------------------------------------------------------

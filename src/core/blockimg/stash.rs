@@ -19,7 +19,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 
 use crate::util::hash;
 use crate::util::rangeset::RangeSet;
@@ -241,6 +241,72 @@ impl StashManager {
         Ok(Arc::from(data))
     }
 
+    /// Try to load data from a stash slot — fault-tolerant version.
+    ///
+    /// This method matches C++ `LoadStash` behavior for non-fatal failures:
+    /// - Returns `Ok(Some(data))` on success
+    /// - Returns `Ok(None)` on non-fatal failures (stash not found, hash mismatch)
+    ///   allowing the caller to continue and let final verification catch issues
+    /// - Returns `Err(...)` on fatal IO errors (EIO, etc.)
+    ///
+    /// # AOSP Behavior Match
+    ///
+    /// In C++ `LoadSourceBlocks`, when loading multiple stashes:
+    /// ```cpp
+    /// if (LoadStash(params, tokens[0], false, &stash, true) == -1) {
+    ///     // These source blocks will fail verification if used later, but we
+    ///     // will let the caller decide if this is a fatal failure
+    ///     LOG(ERROR) << "failed to load stash " << tokens[0];
+    ///     continue;
+    /// }
+    /// ```
+    /// The C++ code continues loading other stashes even if one fails,
+    /// and relies on final `VerifyBlocks` to detect corruption.
+    pub fn try_load(&mut self, id: &str) -> Result<Option<Arc<[u8]>>> {
+        let path = self.stash_path(id);
+
+        // Try to read from disk.
+        let data = match fs::read(&path) {
+            Ok(d) => d,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    log::warn!("stash try_load: {} not found", id);
+                    return Ok(None);
+                }
+                // Fatal IO error
+                return Err(e).with_context(|| {
+                    format!("stash try_load: fatal IO error reading {}", path.display())
+                });
+            }
+        };
+
+        // Try to verify integrity - non-fatal failure on hash mismatch.
+        if let Err(e) = verify_stash_sha1(id, &data) {
+            log::error!("stash try_load: hash mismatch for {}: {}", id, e);
+            // Delete corrupted stash file (matches C++ behavior in LoadStash)
+            if let Err(del_err) = fs::remove_file(&path) {
+                log::warn!(
+                    "stash try_load: failed to delete corrupted {}: {}",
+                    path.display(),
+                    del_err
+                );
+            }
+            return Ok(None);
+        }
+
+        // Update metadata if not present (for resume support)
+        if !self.entries.contains_key(id) {
+            let blocks = (data.len() / self.block_size) as u64;
+            self.entries.insert(id.to_string(), blocks);
+            self.current_blocks += blocks;
+        }
+
+        log::debug!("stash try_load: {} ({} bytes from disk)", id, data.len());
+
+        // Return data without caching.
+        Ok(Some(Arc::from(data)))
+    }
+
     /// Load only specific byte ranges from a stash file (方案6).
     ///
     /// Instead of reading the entire stash file into memory, calculates the
@@ -375,11 +441,10 @@ impl StashManager {
         for entry in entries {
             let entry = entry.context("stash clear_all: readdir error")?;
             let path = entry.path();
-            if path.is_file() {
-                if let Err(e) = fs::remove_file(&path) {
+            if path.is_file()
+                && let Err(e) = fs::remove_file(&path) {
                     errors.push(format!("{}: {e}", path.display()));
                 }
-            }
         }
 
         if !errors.is_empty() {

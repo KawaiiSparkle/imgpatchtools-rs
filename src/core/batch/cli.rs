@@ -110,13 +110,10 @@ pub fn run(args: &BatchArgs) -> Result<()> {
     let threads = args.threads.min(max_threads).max(1);
 
     // Determine output directory (defaults to <workdir>/output).
-    let output_dir = args
-        .output
-        .clone()
-        .unwrap_or_else(|| {
-            let workdir_path = std::path::Path::new(&args.workdir);
-            workdir_path.join("output").to_string_lossy().into_owned()
-        });
+    let output_dir = args.output.clone().unwrap_or_else(|| {
+        let workdir_path = std::path::Path::new(&args.workdir);
+        workdir_path.join("output").to_string_lossy().into_owned()
+    });
 
     let config = super::BatchConfig {
         workdir: args.workdir.clone(),

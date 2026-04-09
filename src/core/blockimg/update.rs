@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use super::commands::{builtin_registry, execute_transfer_list};
 use super::context::{CommandContext, ParallelNewDataReader, PatchDataReader};
 use super::stash::StashManager;
-use super::transfer_list::{parse_transfer_list, TransferList};
+use super::transfer_list::{TransferList, parse_transfer_list};
 use crate::util::io::BlockFile;
 use crate::util::progress::new_progress;
 use crate::util::rangeset::RangeSet;
@@ -83,7 +83,7 @@ pub fn block_image_update(
 
     ctx.stash.clear_all().context("failed to clean up stash")?;
     ctx.target.flush().context("failed to flush target image")?;
-    
+
     // 报告多线程诊断信息
     ctx.new_data.report_diagnostics();
 
@@ -208,12 +208,11 @@ fn open_or_create_target(path: &Path, tl: &TransferList) -> Result<BlockFile> {
         expected_len,
     );
 
-    if let Some(parent) = path.parent() {
-        if !parent.exists() {
+    if let Some(parent) = path.parent()
+        && !parent.exists() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create parent dir {}", parent.display()))?;
         }
-    }
 
     BlockFile::create(path, tl.total_blocks(), BLOCK_SIZE)
         .with_context(|| format!("failed to create target {}", path.display()))

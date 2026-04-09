@@ -1,12 +1,16 @@
 use crate::util::io::BlockFile;
 use crate::util::progress::ProgressReporter;
 use crate::util::rangeset::RangeSet;
+<<<<<<< HEAD
+use anyhow::{Context, Result, ensure};
+use crossbeam_channel::{Receiver, Sender, bounded};
+=======
 use anyhow::{ensure, Result};
 use crossbeam_queue::ArrayQueue;
+>>>>>>> parent of fcbdcef (feat: add NewDataReader abstraction with switch mechanism)
 use std::borrow::Cow;
 use std::fs::File;
 use std::io::{self, Read};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 
@@ -146,12 +150,19 @@ impl ParallelNewDataReader {
             file_path.display()
         );
 
+<<<<<<< HEAD
+        // Create bounded channel for backpressure
+        // Sender blocks when full instead of dropping data
+        let (tx, rx) = bounded::<Vec<u8>>(CHANNEL_CAPACITY);
+
+=======
         // Create shared buffer pool and queue
         let pool = Arc::new(BufferPool::new());
         let queue = Arc::new(ArrayQueue::<Vec<u8>>::new(NUM_POOL_BUFFERS));
         let pool_clone = Arc::clone(&pool);
         let queue_clone = Arc::clone(&queue);
         
+>>>>>>> parent of fcbdcef (feat: add NewDataReader abstraction with switch mechanism)
         // 创建诊断统计
         let diag_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let diag_full = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -162,10 +173,14 @@ impl ParallelNewDataReader {
 
         // Spawn background thread for decompression
         let handle = thread::spawn(move || {
+<<<<<<< HEAD
+            let result = Self::decompressor_thread(file_path, ext, tx, diag_bytes_clone);
+=======
             let result = Self::decompressor_thread_with_diag(
                 file_path, ext, pool_clone, queue_clone,
                 diag_bytes_clone, diag_full_clone
             );
+>>>>>>> parent of fcbdcef (feat: add NewDataReader abstraction with switch mechanism)
             if let Err(e) = result {
                 log::error!("background decompressor thread failed: {}", e);
             }
@@ -221,7 +236,13 @@ impl ParallelNewDataReader {
             }
         };
 
+<<<<<<< HEAD
+        // Read and send chunks - sender blocks when channel is full
+        let mut total_decompressed: u64 = 0;
+
+=======
         // Read and send chunks using memory pool
+>>>>>>> parent of fcbdcef (feat: add NewDataReader abstraction with switch mechanism)
         loop {
             let mut chunk = pool.acquire();
             match reader.read(&mut chunk) {
@@ -232,6 +253,14 @@ impl ParallelNewDataReader {
                 } // EOF
                 Ok(n) => {
                     chunk.truncate(n);
+<<<<<<< HEAD
+                    total_decompressed += n as u64;
+
+                    // Block until channel has space (never drops data)
+                    if sender.send(chunk).is_err() {
+                        log::error!("decompressor: channel closed, stopping");
+                        break;
+=======
                     // Spin-wait briefly if queue is full (backpressure)
                     let mut retries = 0;
                     while let Err(c) = queue.push(chunk) {
@@ -242,6 +271,7 @@ impl ParallelNewDataReader {
                         }
                         std::thread::yield_now();
                         retries += 1;
+>>>>>>> parent of fcbdcef (feat: add NewDataReader abstraction with switch mechanism)
                     }
                 }
                 Err(e) => {
@@ -329,8 +359,12 @@ impl ParallelNewDataReader {
 
         // 更新诊断统计
         bytes_decompressed.store(total_decompressed, std::sync::atomic::Ordering::SeqCst);
+<<<<<<< HEAD
+
+=======
         queue_full_count.store(full_count, std::sync::atomic::Ordering::SeqCst);
         
+>>>>>>> parent of fcbdcef (feat: add NewDataReader abstraction with switch mechanism)
         log::info!(
             "background thread stats: decompressed {} MB, queue full {} times",
             total_decompressed / 1_048_576,
@@ -437,6 +471,34 @@ impl ParallelNewDataReader {
     pub fn bytes_received(&self) -> usize {
         self.total_received
     }
+<<<<<<< HEAD
+
+    /// Print diagnostics report
+    pub fn report_diagnostics(&self) {
+        let decompressed = self
+            .diag_bytes_decompressed
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let finished = self
+            .diag_thread_finished
+            .load(std::sync::atomic::Ordering::SeqCst);
+
+        log::info!("=== ParallelNewDataReader Diagnostics ===");
+        log::info!(
+            "Thread status: {}",
+            if finished { "completed" } else { "running" }
+        );
+        log::info!(
+            "Decompressed: {} ({} MB)",
+            decompressed,
+            decompressed / 1_048_576
+        );
+        log::info!(
+            "Consumed: {} ({} MB)",
+            self.total_received,
+            self.total_received / 1_048_576
+        );
+
+=======
     
     /// 打印多线程诊断报告
     pub fn report_diagnostics(&self) {
@@ -450,16 +512,25 @@ impl ParallelNewDataReader {
         log::info!("主线程消费字节数: {} ({} MB)", self.total_received, self.total_received / 1_048_576);
         log::info!("队列满次数 (后台等待): {}", full_count);
         
+>>>>>>> parent of fcbdcef (feat: add NewDataReader abstraction with switch mechanism)
         if decompressed > 0 {
             let ratio = (self.total_received as f64) / (decompressed as f64);
             log::info!("消费/解压比例: {:.2}%", ratio * 100.0);
         }
-        
+
         if finished && decompressed == self.total_received as u64 {
             log::info!("✓ 多线程工作正常：所有解压数据已被消费");
         } else if finished && decompressed != self.total_received as u64 {
+<<<<<<< HEAD
+            log::warn!(
+                "MISMATCH: decompressed {} MB, consumed {} MB",
+                decompressed / 1_048_576,
+                self.total_received / 1_048_576
+            );
+=======
             log::warn!("✗ 数据不匹配：解压 {} MB，消费 {} MB", 
                 decompressed / 1_048_576, self.total_received / 1_048_576);
+>>>>>>> parent of fcbdcef (feat: add NewDataReader abstraction with switch mechanism)
         } else {
             log::info!("? 后台线程仍在运行或尚未完成");
         }
@@ -661,8 +732,13 @@ impl CommandContext {
     /// This matches C++ `allocate(size, buffer)` behavior.
     pub fn get_reuse_buffer(&mut self, min_capacity: usize) -> &mut Vec<u8> {
         if self.reuse_buffer.capacity() < min_capacity {
+<<<<<<< HEAD
+            self.reuse_buffer
+                .reserve(min_capacity - self.reuse_buffer.capacity());
+=======
             // Need to grow - reserve exact amount to avoid overallocation
             self.reuse_buffer.reserve(min_capacity - self.reuse_buffer.capacity());
+>>>>>>> parent of fcbdcef (feat: add NewDataReader abstraction with switch mechanism)
         }
         // Set len without initializing - caller must write all bytes
         unsafe {
@@ -676,7 +752,8 @@ impl CommandContext {
     pub fn take_reuse_buffer(&mut self, size: usize) -> &mut [u8] {
         self.reuse_buffer.clear();
         if self.reuse_buffer.capacity() < size {
-            self.reuse_buffer.reserve(size - self.reuse_buffer.capacity());
+            self.reuse_buffer
+                .reserve(size - self.reuse_buffer.capacity());
         }
         unsafe {
             self.reuse_buffer.set_len(size);
@@ -684,22 +761,163 @@ impl CommandContext {
         &mut self.reuse_buffer[..size]
     }
 
+<<<<<<< HEAD
+    /// Load source blocks with stash support — matches AOSP `LoadSourceBlocks`.
+    ///
+    /// Loads data from:
+    /// 1. Source image ranges (if provided)
+    /// 2. Stash refs (with fault tolerance - continues even if some stashes fail)
+    ///
+    /// The data is merged into a single buffer according to `buffer_map` (if provided)
+    /// or concatenated in order.
+    ///
+    /// # Fault Tolerance
+    ///
+    /// Matches C++ behavior: if a stash fails to load (not found, hash mismatch),
+    /// logs a warning and continues. The final verification step will catch
+    /// any corruption caused by missing stash data.
+=======
     /// Load source blocks into a contiguous buffer for patch application.
     ///
     /// This is the standard path for bsdiff/imgdiff which require all source
     /// data as a single contiguous buffer. For simple move operations without
     /// stash refs, prefer [`load_src_blocks_cow`](Self::load_src_blocks_cow)
     /// to avoid unnecessary copies.
+>>>>>>> parent of fcbdcef (feat: add NewDataReader abstraction with switch mechanism)
     pub fn load_src_blocks(
         &mut self,
         ranges: &RangeSet,
-        _stash_map: &std::collections::HashMap<String, RangeSet>,
+        stash_refs: &[(String, RangeSet)],
+        buffer_map: Option<&RangeSet>,
     ) -> Result<Vec<u8>> {
-        if let Some(ref src) = self.source {
-            src.read_ranges(ranges)
-        } else {
-            anyhow::bail!("no source image available to load blocks from")
+        // Calculate total size needed
+        let total_blocks = ranges.blocks();
+        let total_bytes = (total_blocks as usize) * self.block_size;
+        let mut result = vec![0u8; total_bytes];
+
+        // 1. Load data from source image if available
+        // (When there's no source image, we expect all data to come from stashes)
+        if !ranges.is_empty()
+            && let Some(ref src) = self.source {
+                let src_data = src.read_ranges(ranges)?;
+                // Copy source data to the beginning of result buffer
+                let copy_len = src_data.len().min(total_bytes);
+                result[..copy_len].copy_from_slice(&src_data[..copy_len]);
+            }
+
+        // 2. Load data from stashes with fault tolerance
+        // Matches C++ behavior: continue even if some stashes fail
+        for (stash_id, stash_ranges) in stash_refs {
+            match self.stash.try_load(stash_id) {
+                Ok(Some(stash_data)) => {
+                    // Copy stash data to the appropriate location in result buffer
+                    // The stash_ranges defines where in the source buffer this data goes
+                    self.copy_stash_to_buffer(&mut result, stash_ranges, &stash_data)?;
+                }
+                Ok(None) => {
+                    // Non-fatal failure: stash not found or hash mismatch
+                    // Log warning and continue - let final verification catch it
+                    log::warn!(
+                        "load_src_blocks: failed to load stash {} (not found or corrupted), \
+                         continuing anyway - verification will catch if data is actually needed",
+                        stash_id
+                    );
+                }
+                Err(e) => {
+                    // Fatal IO error
+                    return Err(e).with_context(|| {
+                        format!("load_src_blocks: fatal error loading stash {}", stash_id)
+                    });
+                }
+            }
         }
+
+        // 3. Apply buffer map if provided
+        // The buffer_map rearranges data from source layout to target layout
+        if let Some(map) = buffer_map {
+            result = self.apply_buffer_map(&result, map)?;
+        }
+
+        Ok(result)
+    }
+
+    /// Copy stash data to the appropriate location in the result buffer.
+    fn copy_stash_to_buffer(
+        &self,
+        buffer: &mut [u8],
+        stash_ranges: &RangeSet,
+        stash_data: &[u8],
+    ) -> Result<()> {
+        let block_size = self.block_size;
+        let mut stash_offset = 0usize;
+
+        for (start, end) in stash_ranges.iter() {
+            let block_count = (end - start) as usize;
+            let byte_len = block_count * block_size;
+
+            // Calculate destination offset in buffer
+            let dest_offset = (start as usize) * block_size;
+
+            // Ensure we don't overflow
+            if dest_offset + byte_len > buffer.len() {
+                anyhow::bail!(
+                    "copy_stash_to_buffer: range {}-{} exceeds buffer size {}",
+                    start,
+                    end,
+                    buffer.len()
+                );
+            }
+            if stash_offset + byte_len > stash_data.len() {
+                anyhow::bail!(
+                    "copy_stash_to_buffer: not enough stash data (need {} bytes from offset {}, have {})",
+                    byte_len,
+                    stash_offset,
+                    stash_data.len()
+                );
+            }
+
+            // Copy the data
+            buffer[dest_offset..dest_offset + byte_len]
+                .copy_from_slice(&stash_data[stash_offset..stash_offset + byte_len]);
+
+            stash_offset += byte_len;
+        }
+
+        Ok(())
+    }
+
+    /// Apply buffer map to rearrange data.
+    /// The buffer_map defines how to rearrange blocks from source layout to target layout.
+    fn apply_buffer_map(&self, buffer: &[u8], map: &RangeSet) -> Result<Vec<u8>> {
+        let block_size = self.block_size;
+        let total_blocks = map.blocks();
+        let total_bytes = (total_blocks as usize) * block_size;
+        let mut result = vec![0u8; total_bytes];
+
+        let mut src_offset = 0usize;
+        let mut result_offset = 0usize;
+
+        for (start, end) in map.iter() {
+            let block_count = (end - start) as usize;
+            let byte_len = block_count * block_size;
+
+            // The map defines which source blocks go to which destination blocks
+            // For now, we assume sequential mapping
+            if src_offset + byte_len > buffer.len() {
+                anyhow::bail!("apply_buffer_map: source range exceeds buffer size");
+            }
+            if result_offset + byte_len > result.len() {
+                anyhow::bail!("apply_buffer_map: destination range exceeds result size");
+            }
+
+            result[result_offset..result_offset + byte_len]
+                .copy_from_slice(&buffer[src_offset..src_offset + byte_len]);
+
+            src_offset += byte_len;
+            result_offset += byte_len;
+        }
+
+        Ok(result)
     }
 
     /// Copy-on-write version: returns a reference to stashed data if available,

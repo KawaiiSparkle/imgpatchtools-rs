@@ -63,9 +63,7 @@ fn find_update_script() -> Result<PathBuf> {
         return Ok(script_in_meta);
     }
 
-    anyhow::bail!(
-        "update-script not found in current directory or META-INF/com/google/android/"
-    )
+    anyhow::bail!("update-script not found in current directory or META-INF/com/google/android/")
 }
 
 /// Extract partition name from source path
@@ -180,9 +178,9 @@ fn parse_args(content: &str) -> Vec<String> {
     let mut args = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
-    let mut chars = content.chars().peekable();
+    let chars = content.chars().peekable();
 
-    while let Some(c) = chars.next() {
+    for c in chars {
         match c {
             '"' => {
                 in_quotes = !in_quotes;
@@ -235,7 +233,9 @@ fn resolve_patch_file(patch_file: &Path) -> Result<PathBuf> {
     }
 
     // Try in patch/ subdirectory
-    let in_patch_dir = current_dir.join("patch").join(patch_file.file_name().unwrap_or_default());
+    let in_patch_dir = current_dir
+        .join("patch")
+        .join(patch_file.file_name().unwrap_or_default());
     if in_patch_dir.exists() {
         return Ok(in_patch_dir);
     }
@@ -247,9 +247,7 @@ fn resolve_patch_file(patch_file: &Path) -> Result<PathBuf> {
 pub fn run(args: &ApplypatchArgs, verbose: bool) -> Result<()> {
     // Determine if we should read from update-script
     let use_script = args.from_script
-        || (args.target_sha1.is_none()
-            && args.target_size.is_none()
-            && args.patch.is_none());
+        || (args.target_sha1.is_none() && args.target_size.is_none() && args.patch.is_none());
 
     if use_script {
         return run_from_script(args, verbose);
@@ -280,13 +278,22 @@ pub fn run(args: &ApplypatchArgs, verbose: bool) -> Result<()> {
     if args.check {
         run_check(&args.source, &target_sha1)
     } else {
-        run_apply(&args.source, &args.target, &target_sha1, target_size, &patch)
+        run_apply(
+            &args.source,
+            &args.target,
+            &target_sha1,
+            target_size,
+            &patch,
+        )
     }
 }
 
 fn run_from_script(args: &ApplypatchArgs, verbose: bool) -> Result<()> {
     let partition_name = extract_partition_name(&args.source);
-    log::info!("Reading apply_patch parameters from update-script for partition: {}", partition_name);
+    log::info!(
+        "Reading apply_patch parameters from update-script for partition: {}",
+        partition_name
+    );
 
     let info = parse_apply_patch_from_script(&partition_name)?;
 

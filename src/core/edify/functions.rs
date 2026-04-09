@@ -3,11 +3,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
-use super::parser::{parse_edify, BinaryOperator, Expr};
+use super::parser::{BinaryOperator, Expr, parse_edify};
 use crate::core::super_img::op_list::DynamicPartitionState;
-use crate::util::progress::{new_progress, ProgressReporter};
+use crate::util::progress::{ProgressReporter, new_progress};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
@@ -335,11 +335,10 @@ fn fn_package_extract_file(ctx: &mut FunctionContext, args: &[Value]) -> Result<
         (sp, "rename")
     };
 
-    if let Some(par) = dp.parent() {
-        if !par.exists() {
+    if let Some(par) = dp.parent()
+        && !par.exists() {
             std::fs::create_dir_all(par)?;
         }
-    }
 
     if operation == "rename" {
         // First extraction: rename the file
@@ -615,11 +614,10 @@ fn fn_block_image_recover(ctx: &mut FunctionContext, args: &[Value]) -> Result<V
     let max_blk = ranges.iter().map(|(_, e)| e).max().unwrap_or(0);
     let req = max_blk * bs;
     let flen = std::fs::metadata(&resolved).map(|m| m.len()).unwrap_or(0);
-    if flen < req {
-        if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&resolved) {
+    if flen < req
+        && let Ok(f) = std::fs::OpenOptions::new().write(true).open(&resolved) {
             let _ = f.set_len(req);
         }
-    }
     match crate::core::blockimg::verify::range_sha1(&resolved, &ranges, bs as usize) {
         Ok(_) => Ok(Value::String("t".into())),
         Err(_) => Ok(Value::String(String::new())),
@@ -870,11 +868,10 @@ fn fn_file_getprop(ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
         if line.starts_with('#') || line.is_empty() {
             continue;
         }
-        if let Some(eq_pos) = line.find('=') {
-            if line[..eq_pos].trim() == key {
+        if let Some(eq_pos) = line.find('=')
+            && line[..eq_pos].trim() == key {
                 return Ok(Value::String(line[eq_pos + 1..].trim().to_string()));
             }
-        }
     }
     Ok(Value::String(String::new()))
 }
@@ -986,7 +983,9 @@ pub fn run_script_with_mode(
         log::info!("edify: offline mode enabled (getprop will return tolerant defaults)");
     }
     if !verify {
-        log::info!("edify: fast mode enabled (only apply_patch, block_image_update and abort will execute)");
+        log::info!(
+            "edify: fast mode enabled (only apply_patch, block_image_update and abort will execute)"
+        );
     } else {
         log::info!("edify: verify mode enabled (all commands will execute)");
     }

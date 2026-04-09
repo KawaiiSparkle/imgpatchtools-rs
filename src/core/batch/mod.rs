@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::core::edify::functions::{builtin_registry, run_script_with_mode};
 use crate::core::super_img::cli::SuperArgs;
@@ -628,11 +628,10 @@ fn partitions_excluded_at(ota_index: usize, config: &BatchConfig) -> Vec<String>
     for part in &all_parts {
         if exclude_set.contains(part) {
             excluded.push(part.clone());
-        } else if let Some(&cap_idx) = config.caps.get(part) {
-            if ota_index > cap_idx {
+        } else if let Some(&cap_idx) = config.caps.get(part)
+            && ota_index > cap_idx {
                 excluded.push(part.clone());
             }
-        }
     }
 
     excluded.sort();
@@ -814,9 +813,7 @@ fn extract_partition_names(script: &str) -> Vec<String> {
     for (i, _) in script.match_indices("/by-name/") {
         let rest = &script[i + "/by-name/".len()..];
         // Partition name ends at a delimiter: quote, close-paren, comma, space, or line end.
-        let end = rest
-            .find(['"', ')', ',', ' ', '\n'])
-            .unwrap_or(rest.len());
+        let end = rest.find(['"', ')', ',', ' ', '\n']).unwrap_or(rest.len());
         let name = rest[..end].trim();
         if !name.is_empty()
             && name.len() < 64
@@ -838,8 +835,7 @@ fn extract_partition_names(script: &str) -> Vec<String> {
         for part in script.split(suffix) {
             let trimmed = part.trim_end_matches(|c: char| c.is_whitespace());
             // Find the last "word" before the suffix.
-            if let Some(pos) = trimmed.rfind(['"', '(', '/', ' '])
-            {
+            if let Some(pos) = trimmed.rfind(['"', '(', '/', ' ']) {
                 let name = trimmed[pos + 1..].trim();
                 if !name.is_empty()
                     && name.len() < 64
@@ -869,8 +865,8 @@ fn move_final_images(workdir: &Path, output_dir: &Path) -> Result<()> {
         if !path.is_file() {
             continue;
         }
-        if let Some(ext) = path.extension() {
-            if ext == "img" {
+        if let Some(ext) = path.extension()
+            && ext == "img" {
                 let dest = output_dir.join(entry.file_name());
                 // Remove destination if exists, then move (overwrite).
                 if dest.exists() {
@@ -882,7 +878,6 @@ fn move_final_images(workdir: &Path, output_dir: &Path) -> Result<()> {
                     .with_context(|| format!("move {} → {}", path.display(), dest.display()))?;
                 log::info!("output: {}", dest.display());
             }
-        }
     }
     Ok(())
 }
@@ -923,7 +918,7 @@ fn build_super_from_batch(
     dp: &DynamicPartitionState,
     workdir: &Path,
     output_dir: &Path,
-    config: &BatchConfig,
+    _config: &BatchConfig,
 ) -> Result<()> {
     let super_args = SuperArgs {
         workdir: workdir.to_string_lossy().into(),
@@ -932,11 +927,10 @@ fn build_super_from_batch(
         op_list: None,
         partitions: None,
         groups: Vec::new(),
-        android_version: config.android_version.clone(),
+        lp_version: "10.0".to_string(), // Default to safest version
         slots: 2,
         device_size: 0,
         metadata_size: 65536,
-        format: config.format.clone(),
     };
 
     // We call the super module's run function directly.

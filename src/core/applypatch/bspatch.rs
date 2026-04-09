@@ -19,7 +19,7 @@
 
 use std::io::Read;
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 
 /// BSDIFF40 magic signature.
 pub const BSDIFF_MAGIC: &[u8; 8] = b"BSDIFF40";
@@ -250,14 +250,14 @@ fn apply_patch_stream_into(
             .context("failed to read diff data from stream")?;
 
         // Add source bytes to the diff chunk (wrapping).
-        for i in 0..add_len {
+        for (i, chunk_byte) in diff_chunk.iter_mut().enumerate().take(add_len) {
             let src_idx = old_pos + i as i64;
             let src_byte = if src_idx >= 0 && src_idx < old_size {
                 source[src_idx as usize]
             } else {
                 0
             };
-            diff_chunk[i] = diff_chunk[i].wrapping_add(src_byte);
+            *chunk_byte = chunk_byte.wrapping_add(src_byte);
         }
 
         new_pos += add_len;
@@ -354,7 +354,7 @@ fn apply_patch_stream_sink(
     let mut ctrl_buf = [0u8; 24];
 
     // Reusable output chunk for diff application (avoids per-iteration alloc)
-    let mut diff_chunk = vec![0u8; 64 * 1024];  // 64KB reusable buffer
+    let mut diff_chunk = vec![0u8; 64 * 1024]; // 64KB reusable buffer
 
     while new_pos < new_size {
         // Read control triple
@@ -370,29 +370,28 @@ fn apply_patch_stream_sink(
         let mut diff_remaining = add_len;
         while diff_remaining > 0 {
             let chunk_size = diff_remaining.min(diff_chunk.len());
-            
+
             // Ensure buffer is large enough
             if diff_chunk.len() < chunk_size {
                 diff_chunk.resize(chunk_size, 0);
             }
-            
+
             diff_stream
                 .read_exact(&mut diff_chunk[..chunk_size])
                 .context("failed to read diff data")?;
 
             // Add source bytes (optimized: use pointer arithmetic)
-            for i in 0..chunk_size {
+            for (i, chunk_byte) in diff_chunk.iter_mut().enumerate().take(chunk_size) {
                 let src_idx = old_pos + i as i64;
                 let src_byte = if src_idx >= 0 && src_idx < old_size {
                     source[src_idx as usize]
                 } else {
                     0
                 };
-                diff_chunk[i] = diff_chunk[i].wrapping_add(src_byte);
+                *chunk_byte = chunk_byte.wrapping_add(src_byte);
             }
 
-            sink(&diff_chunk[..chunk_size])
-                .context("sink failed during diff write")?;
+            sink(&diff_chunk[..chunk_size]).context("sink failed during diff write")?;
 
             diff_remaining -= chunk_size;
             new_pos += chunk_size;
@@ -403,17 +402,16 @@ fn apply_patch_stream_sink(
         let mut extra_remaining = copy_len;
         while extra_remaining > 0 {
             let chunk_size = extra_remaining.min(diff_chunk.len());
-            
+
             if diff_chunk.len() < chunk_size {
                 diff_chunk.resize(chunk_size, 0);
             }
-            
+
             extra_stream
                 .read_exact(&mut diff_chunk[..chunk_size])
                 .context("failed to read extra data")?;
 
-            sink(&diff_chunk[..chunk_size])
-                .context("sink failed during extra write")?;
+            sink(&diff_chunk[..chunk_size]).context("sink failed during extra write")?;
 
             extra_remaining -= chunk_size;
             new_pos += chunk_size;

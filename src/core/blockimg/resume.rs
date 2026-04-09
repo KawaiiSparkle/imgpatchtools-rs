@@ -15,7 +15,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 /// File format version written to the first line.
 const RESUME_FILE_VERSION: u32 = 1;

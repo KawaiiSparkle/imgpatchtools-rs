@@ -3,25 +3,27 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use clap::Args;
 
 use crate::core::super_img::builder::{
-    auto_device_size, build_metadata, GroupInfo, PartitionInfo, SuperConfig,
+    GroupInfo, PartitionInfo, SuperConfig, auto_device_size, build_metadata,
 };
 use crate::core::super_img::lp_metadata::{
-    read_name, LpVersion, LP_DEFAULT_ALIGNMENT, LP_PARTITION_ATTR_READONLY, LP_SECTOR_SIZE,
-    LP_TARGET_TYPE_LINEAR,
+    LP_DEFAULT_ALIGNMENT, LP_PARTITION_ATTR_READONLY, LP_SECTOR_SIZE, LP_TARGET_TYPE_LINEAR,
+    LpVersion, read_name,
 };
-use crate::core::super_img::op_list::{parse_op_list, DynamicPartitionState};
+use crate::core::super_img::op_list::{DynamicPartitionState, parse_op_list};
 use crate::core::super_img::reader::read_metadata;
-use crate::core::super_img::writer::{write_super, SuperImageFormat};
+use crate::core::super_img::writer::{SuperImageFormat, write_super};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Argument structs
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Smart super.img builder — auto-detect partitions from workdir.
+///
+/// NOTE: Only RAW format is supported. Use img2simg to convert to sparse if needed.
 #[derive(Args, Debug, Clone)]
 pub struct SuperArgs {
     /// Working directory containing *.img partition files.
@@ -49,9 +51,15 @@ pub struct SuperArgs {
     #[arg(long, num_args = 1)]
     pub groups: Vec<String>,
 
-    /// Android version for LP metadata format (10, 11, 12+).
-    #[arg(long, default_value = "12")]
-    pub android_version: String,
+    /// LP metadata version (format: "major.minor", e.g., "10.0", "10.1", "10.2").
+    /// Default: "10.0" (safest for most devices).
+    ///
+    /// IMPORTANT: Use lpdump on your device's super partition to determine the correct version.
+    /// - 10.0: Android 10 (Q)
+    /// - 10.1: Android 11 (R)
+    /// - 10.2: Android 12+ (S/T/U), enables Virtual A/B
+    #[arg(long, default_value = "10.0")]
+    pub lp_version: String,
 
     /// Number of metadata slots (1 = non-A/B, 2 = A/B).
     #[arg(long, default_value = "2")]
@@ -64,13 +72,12 @@ pub struct SuperArgs {
     /// Metadata region size in bytes.
     #[arg(long, default_value = "65536")]
     pub metadata_size: u32,
-
-    /// Output format: "sparse" or "raw".
-    #[arg(long, default_value = "sparse")]
-    pub format: String,
 }
 
 /// Expert super.img builder — like AOSP lpmake.
+///
+/// NOTE: Only RAW format is supported. Output is always RAW.
+/// Users should manually convert to sparse if needed: img2simg raw.img sparse.img
 #[derive(Args, Debug, Clone)]
 pub struct LpmakeArgs {
     /// Output super.img path.
@@ -101,9 +108,15 @@ pub struct LpmakeArgs {
     #[arg(long, default_value = "4096")]
     pub logical_block_size: u32,
 
-    /// Android version for LP metadata format (10, 11, 12+).
-    #[arg(long, default_value = "12")]
-    pub android_version: String,
+    /// LP metadata version (format: "major.minor", e.g., "10.0", "10.1", "10.2").
+    /// Default: "10.0" (safest for most devices).
+    ///
+    /// IMPORTANT: Use lpdump on your device's super partition to determine the correct version.
+    /// - 10.0: Android 10 (Q)
+    /// - 10.1: Android 11 (R)
+    /// - 10.2: Android 12+ (S/T/U), enables Virtual A/B
+    #[arg(long, default_value = "10.0")]
+    pub lp_version: String,
 
     /// Partition spec "name:group:size[:attr]" (repeatable).
     #[arg(long, num_args = 1)]
@@ -112,10 +125,6 @@ pub struct LpmakeArgs {
     /// Group spec "name:max_size" (repeatable).
     #[arg(long, num_args = 1)]
     pub group: Vec<String>,
-
-    /// Write sparse output format.
-    #[arg(long, default_value_t = true)]
-    pub sparse: bool,
 }
 
 /// Dump LP metadata from a super.img — like AOSP lpdump.
@@ -153,9 +162,10 @@ pub struct LpunpackArgs {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub fn run(args: &SuperArgs) -> Result<()> {
-    let version = parse_android_version(&args.android_version);
-    let format = parse_format(&args.format)?;
+    let version = parse_lp_version(&args.lp_version);
     let metadata_slots = args.slots.max(1);
+    // Output is always RAW format
+    let format = SuperImageFormat::Raw;
 
     // Resolve partition and group lists.
     let dp = resolve_partitions(args)?;
@@ -418,15 +428,12 @@ fn scan_workdir(workdir: &str) -> Result<DynamicPartitionState> {
     for entry in fs::read_dir(dir).context("read workdir")? {
         let entry = entry.context("read dir entry")?;
         let path = entry.path();
-        if path.is_file() {
-            if let Some(stem) = path.file_stem() {
-                if let Some(ext) = path.extension() {
-                    if ext == std::ffi::OsStr::new("img") {
+        if path.is_file()
+            && let Some(stem) = path.file_stem()
+                && let Some(ext) = path.extension()
+                    && ext == std::ffi::OsStr::new("img") {
                         entries.push(stem.to_string_lossy().into_owned());
                     }
-                }
-            }
-        }
     }
     entries.sort();
 
@@ -465,12 +472,9 @@ pub fn run_lpmake(args: &LpmakeArgs) -> Result<()> {
         "at least one --partition spec is required (name:group:size[:attr])"
     );
 
-    let version = parse_android_version(&args.android_version);
-    let format = if args.sparse {
-        SuperImageFormat::Sparse
-    } else {
-        SuperImageFormat::Raw
-    };
+    let version = parse_lp_version(&args.lp_version);
+    // Output is always RAW format
+    let format = SuperImageFormat::Raw;
     let metadata_slots = args.metadata_slots.max(1);
 
     // Parse groups: "name:max_size"
@@ -727,11 +731,10 @@ pub fn run_lpunpack(args: &LpunpackArgs) -> Result<()> {
         let name = p.name_str();
 
         // Apply partition filter.
-        if let Some(ref filt) = filter {
-            if !filt.contains(&name) {
+        if let Some(ref filt) = filter
+            && !filt.contains(&name) {
                 continue;
             }
-        }
 
         if p.num_extents == 0 {
             log::warn!("skipping '{}': no extents", name);
@@ -824,22 +827,21 @@ pub fn run_lpunpack(args: &LpunpackArgs) -> Result<()> {
 // Shared helpers
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Parse Android version string into LpVersion.
-fn parse_android_version(ver: &str) -> LpVersion {
-    LpVersion::from_android_version(ver).unwrap_or_else(|| {
-        log::warn!(
-            "unknown Android version '{}', defaulting to v10.2 (Android 12+)",
-            ver
-        );
-        LpVersion::V1_2
-    })
-}
-
-/// Parse format string into SuperImageFormat.
-fn parse_format(fmt: &str) -> Result<SuperImageFormat> {
-    match fmt.to_lowercase().as_str() {
-        "sparse" => Ok(SuperImageFormat::Sparse),
-        "raw" => Ok(SuperImageFormat::Raw),
-        _ => anyhow::bail!("unknown format '{}', expected 'sparse' or 'raw'", fmt),
-    }
+/// Parse LP version string (e.g., "10.0", "10.1", "10.2") into LpVersion.
+fn parse_lp_version(ver: &str) -> LpVersion {
+    let parts: Vec<&str> = ver.split('.').collect();
+    if parts.len() == 2
+        && let (Ok(major), Ok(minor)) = (parts[0].parse::<u16>(), parts[1].parse::<u16>()) {
+            match (major, minor) {
+                (10, 0) => return LpVersion::V1_0,
+                (10, 1) => return LpVersion::V1_1,
+                (10, 2) => return LpVersion::V1_2,
+                _ => {}
+            }
+        }
+    log::warn!(
+        "invalid LP version '{}', defaulting to v10.0 (safest for most devices)",
+        ver
+    );
+    LpVersion::V1_0
 }

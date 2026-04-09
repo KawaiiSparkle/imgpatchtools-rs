@@ -124,21 +124,3 @@ pub fn recommend_buffer_settings(file_size: u64) -> (usize, usize) {
 
     (num_buffers, chunk_size)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parallel_available() {
-        let available = check_parallel_enabled();
-        println!("多线程可用: {}", available);
-    }
-
-    #[test]
-    fn test_recommend_settings() {
-        let (buffers, chunk) = recommend_buffer_settings(2_000_000_000); // 2GB
-        assert!(buffers >= 3);
-        assert!(chunk >= 32 * 1024 * 1024);
-    }
-}

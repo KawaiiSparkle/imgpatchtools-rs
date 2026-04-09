@@ -12,10 +12,10 @@
 use std::fs::File;
 use std::path::Path;
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use rayon::prelude::*;
-use sha1::digest::Digest;
 use sha1::Sha1;
+use sha1::digest::Digest;
 use sha2::Sha256;
 
 use crate::util::rangeset::RangeSet;

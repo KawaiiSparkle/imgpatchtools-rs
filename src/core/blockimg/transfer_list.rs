@@ -1,5 +1,5 @@
 use crate::util::rangeset::RangeSet;
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 
 pub const MIN_VERSION: u32 = 1;
 pub const MAX_VERSION: u32 = 4;
@@ -14,6 +14,7 @@ pub enum CommandType {
     Imgdiff,
     Stash,
     Free,
+    ComputeHashTree,
 }
 
 impl CommandType {
@@ -27,6 +28,7 @@ impl CommandType {
             "imgdiff" => Ok(Self::Imgdiff),
             "stash" => Ok(Self::Stash),
             "free" => Ok(Self::Free),
+            "compute_hash_tree" => Ok(Self::ComputeHashTree),
             other => bail!("unknown command: {other:?}"),
         }
     }
@@ -41,6 +43,7 @@ impl CommandType {
             Self::Imgdiff => "imgdiff",
             Self::Stash => "stash",
             Self::Free => "free",
+            Self::ComputeHashTree => "compute_hash_tree",
         }
     }
 
@@ -71,6 +74,12 @@ pub struct TransferCommand {
     pub src_hash: Option<String>,
     /// stash refs: (stash_id, ranges_in_source_buffer)
     pub src_stash_refs: Vec<(String, RangeSet)>,
+    /// For compute_hash_tree command
+    pub hash_tree_ranges: Option<RangeSet>,
+    pub hash_tree_source_ranges: Option<RangeSet>,
+    pub hash_algorithm: Option<String>,
+    pub hash_tree_salt: Option<String>,
+    pub hash_tree_root_hash: Option<String>,
     pub raw_line: String,
 }
 
@@ -83,6 +92,9 @@ pub struct TransferList {
 impl TransferList {
     pub fn len(&self) -> usize {
         self.commands.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.commands.is_empty()
     }
     pub fn version(&self) -> u32 {
         self.header.version
@@ -176,6 +188,7 @@ fn parse_command(line: &str, version: u32) -> Result<TransferCommand> {
         CommandType::Bsdiff | CommandType::Imgdiff => {
             parse_patch_cmd(cmd_type, &tokens, &mut pos, line, version)
         }
+        CommandType::ComputeHashTree => parse_compute_hash_tree_cmd(&tokens, &mut pos, line),
     }
 }
 
@@ -198,6 +211,11 @@ fn parse_simple_cmd(
         target_hash: None,
         src_hash: None,
         src_stash_refs: Vec::new(),
+        hash_tree_ranges: None,
+        hash_tree_source_ranges: None,
+        hash_algorithm: None,
+        hash_tree_salt: None,
+        hash_tree_root_hash: None,
         raw_line: line.to_string(),
     })
 }
@@ -223,6 +241,11 @@ fn parse_stash_cmd(
         target_hash: None,
         src_hash: None,
         src_stash_refs: Vec::new(),
+        hash_tree_ranges: None,
+        hash_tree_source_ranges: None,
+        hash_algorithm: None,
+        hash_tree_salt: None,
+        hash_tree_root_hash: None,
         raw_line: line.to_string(),
     })
 }
@@ -247,6 +270,11 @@ fn parse_free_cmd(
         target_hash: None,
         src_hash: None,
         src_stash_refs: Vec::new(),
+        hash_tree_ranges: None,
+        hash_tree_source_ranges: None,
+        hash_algorithm: None,
+        hash_tree_salt: None,
+        hash_tree_root_hash: None,
         raw_line: line.to_string(),
     })
 }
@@ -293,6 +321,11 @@ fn parse_move_cmd(
             target_hash,
             src_hash,
             src_stash_refs: Vec::new(),
+            hash_tree_ranges: None,
+            hash_tree_source_ranges: None,
+            hash_algorithm: None,
+            hash_tree_salt: None,
+            hash_tree_root_hash: None,
             raw_line: line.to_string(),
         });
     }
@@ -312,6 +345,11 @@ fn parse_move_cmd(
         target_hash,
         src_hash,
         src_stash_refs: stash_refs,
+        hash_tree_ranges: None,
+        hash_tree_source_ranges: None,
+        hash_algorithm: None,
+        hash_tree_salt: None,
+        hash_tree_root_hash: None,
         raw_line: line.to_string(),
     })
 }
@@ -351,6 +389,11 @@ fn parse_patch_cmd(
             target_hash,
             src_hash,
             src_stash_refs: Vec::new(),
+            hash_tree_ranges: None,
+            hash_tree_source_ranges: None,
+            hash_algorithm: None,
+            hash_tree_salt: None,
+            hash_tree_root_hash: None,
             raw_line: line.to_string(),
         });
     }
@@ -370,11 +413,17 @@ fn parse_patch_cmd(
         target_hash,
         src_hash,
         src_stash_refs: stash_refs,
+        hash_tree_ranges: None,
+        hash_tree_source_ranges: None,
+        hash_algorithm: None,
+        hash_tree_salt: None,
+        hash_tree_root_hash: None,
         raw_line: line.to_string(),
     })
 }
 
 /// Returns (src_block_count, src_ranges, stash_refs)
+#[allow(clippy::type_complexity)]
 fn parse_source_spec(
     tokens: &[&str],
     pos: &mut usize,
@@ -465,4 +514,45 @@ fn read_u64(tokens: &[&str], pos: &mut usize, label: &str) -> Result<u64> {
 fn read_rangeset(tokens: &[&str], pos: &mut usize, label: &str) -> Result<RangeSet> {
     let tok = read_token(tokens, pos, label)?;
     RangeSet::parse(tok).with_context(|| format!("{label}: bad range set: {tok:?}"))
+}
+
+/// Parse compute_hash_tree command.
+/// Format: compute_hash_tree <hash_tree_ranges> <source_ranges> <hash_alg> <salt_hex> <root_hash>
+fn parse_compute_hash_tree_cmd(
+    tokens: &[&str],
+    pos: &mut usize,
+    line: &str,
+) -> Result<TransferCommand> {
+    // Expect exactly 5 arguments after the command name
+    ensure!(
+        tokens.len() == 6,
+        "compute_hash_tree: expected 5 arguments (hash_tree_ranges, source_ranges, hash_alg, salt, root_hash), got {}",
+        tokens.len() - 1
+    );
+
+    let hash_tree_ranges = read_rangeset(tokens, pos, "hash_tree_ranges")?;
+    let source_ranges = read_rangeset(tokens, pos, "source_ranges")?;
+    let hash_alg = read_token(tokens, pos, "hash_algorithm")?.to_string();
+    let salt = read_token(tokens, pos, "salt_hex")?.to_string();
+    let root_hash = read_token(tokens, pos, "root_hash")?.to_string();
+
+    Ok(TransferCommand {
+        cmd_type: CommandType::ComputeHashTree,
+        target_ranges: None,
+        src_block_count: None,
+        src_ranges: None,
+        src_buffer_map: None,
+        stash_id: None,
+        patch_offset: None,
+        patch_len: None,
+        target_hash: None,
+        src_hash: None,
+        src_stash_refs: Vec::new(),
+        hash_tree_ranges: Some(hash_tree_ranges),
+        hash_tree_source_ranges: Some(source_ranges),
+        hash_algorithm: Some(hash_alg),
+        hash_tree_salt: Some(salt),
+        hash_tree_root_hash: Some(root_hash),
+        raw_line: line.to_string(),
+    })
 }

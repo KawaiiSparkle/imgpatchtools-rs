@@ -4,7 +4,7 @@
 //! while keeping buffered I/O for writes and small random access.
 
 use crate::util::rangeset::RangeSet;
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -52,8 +52,6 @@ pub struct BlockFile {
     block_size: usize,
     /// Total file length in bytes (cached, updated on resize).
     file_len: u64,
-    /// Path for remapping on write.
-    path: std::path::PathBuf,
 }
 
 impl BlockFile {
@@ -61,15 +59,15 @@ impl BlockFile {
     pub fn total_blocks(&self) -> u64 {
         self.file_len / self.block_size as u64
     }
-    
+
     /// Get mutable reference to underlying file for direct I/O.
-    /// 
+    ///
     /// # Safety
     /// Caller must ensure proper seeking and block-aligned access.
     pub fn file_mut(&mut self) -> &mut File {
         &mut self.file
     }
-    
+
     /// Get block size
     pub fn block_size(&self) -> usize {
         self.block_size
@@ -104,7 +102,6 @@ impl BlockFile {
             mmap,
             block_size,
             file_len,
-            path: path.to_path_buf(),
         })
     }
 
@@ -127,7 +124,6 @@ impl BlockFile {
             mmap: None,
             block_size,
             file_len,
-            path: path.to_path_buf(),
         })
     }
 
@@ -283,7 +279,7 @@ impl BlockFile {
     }
 
     /// Write ranges using memory-mapped I/O (optimized for large sequential writes).
-    /// 
+    ///
     /// CRITICAL: Uses synchronous flush to ensure Bit-Exact consistency.
     /// Async flush would risk data loss on crash and verification failures.
     fn write_ranges_mmap(&mut self, ranges: &RangeSet, data: &[u8]) -> Result<()> {
@@ -315,9 +311,11 @@ impl BlockFile {
         // before returning. This guarantees Bit-Exact consistency and
         // prevents race conditions with subsequent read operations.
         mmap.flush().context("sync flush of mmap writes")?;
-        
+
         // Additional safety: sync file metadata to ensure durability
-        self.file.sync_data().context("sync_data after mmap write")?;
+        self.file
+            .sync_data()
+            .context("sync_data after mmap write")?;
 
         Ok(())
     }
@@ -377,10 +375,11 @@ impl BlockFile {
         F: FnMut(&mut [u8]) -> Result<()>,
         R: FnMut(u64),
     {
-        let total_bytes: usize = ranges.iter()
+        let total_bytes: usize = ranges
+            .iter()
             .map(|(s, e)| ((e - s) as usize) * self.block_size)
             .sum();
-        
+
         // Use mmap for large sequential writes
         if total_bytes >= MMAP_WRITE_THRESHOLD && ranges.range_count() == 1 {
             return self.write_ranges_with_callback_mmap(ranges, read_fn, progress_cb);
@@ -419,7 +418,7 @@ impl BlockFile {
     }
 
     /// Mmap-optimized version of write_ranges_with_callback for large writes.
-    /// 
+    ///
     /// CRITICAL: Uses synchronous flush to ensure Bit-Exact consistency.
     fn write_ranges_with_callback_mmap<F, R>(
         &mut self,
@@ -456,11 +455,11 @@ impl BlockFile {
             while written < total_len {
                 let chunk = (total_len - written).min(temp_buf.len());
                 read_fn(&mut temp_buf[..chunk])?;
-                
+
                 // Copy to mmap
                 mmap[file_offset + written..file_offset + written + chunk]
                     .copy_from_slice(&temp_buf[..chunk]);
-                
+
                 written += chunk;
                 if chunk.is_multiple_of(self.block_size) {
                     progress_blocks += (chunk / self.block_size) as u64;
@@ -471,8 +470,10 @@ impl BlockFile {
 
         // CRITICAL FIX: Synchronous flush ensures Bit-Exact consistency
         mmap.flush().context("sync flush of mmap callback writes")?;
-        self.file.sync_data().context("sync_data after mmap callback write")?;
-        
+        self.file
+            .sync_data()
+            .context("sync_data after mmap callback write")?;
+
         Ok(())
     }
 
@@ -529,13 +530,9 @@ impl BlockFile {
     }
 
     /// Mmap-to-mmap copy for maximum performance (zero kernel copies).
-    /// 
+    ///
     /// CRITICAL: Uses synchronous flush to ensure Bit-Exact consistency.
-    fn copy_ranges_mmap(
-        &mut self,
-        ranges: &RangeSet,
-        src_mmap: &memmap2::Mmap,
-    ) -> Result<()> {
+    fn copy_ranges_mmap(&mut self, ranges: &RangeSet, src_mmap: &memmap2::Mmap) -> Result<()> {
         let mut mmap = unsafe { memmap2::MmapMut::map_mut(&self.file)? };
 
         for (start, end) in ranges.iter() {
@@ -559,7 +556,7 @@ impl BlockFile {
         // CRITICAL FIX: Synchronous flush ensures Bit-Exact consistency
         mmap.flush().context("sync flush of mmap copy")?;
         self.file.sync_data().context("sync_data after mmap copy")?;
-        
+
         Ok(())
     }
 
@@ -598,8 +595,8 @@ impl BlockFile {
             let mut use_sparse = true;
 
             for (start, end) in ranges.iter() {
-                let file_offset = (start as u64) * (self.block_size as u64);
-                let byte_len = ((end - start) as u64) * (self.block_size as u64);
+                let file_offset = start * (self.block_size as u64);
+                let byte_len = (end - start) * (self.block_size as u64);
 
                 if use_sparse {
                     match crate::util::platform::zero_data(&self.file, file_offset, byte_len) {
@@ -624,7 +621,40 @@ impl BlockFile {
                     let chunk = remaining.min(zeros.len());
                     self.file.write_all(&zeros[..chunk])?;
                     remaining -= chunk;
-                    if chunk % self.block_size == 0 {
+                    if chunk.is_multiple_of(self.block_size) {
+                        progress_cb((chunk / self.block_size) as u64);
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        // Non-Windows: Try mmap zero for large contiguous ranges
+        #[cfg(not(target_os = "windows"))]
+        {
+            let total_zero_bytes: usize = ranges
+                .iter()
+                .map(|(s, e)| ((e - s) as usize) * self.block_size)
+                .sum();
+
+            if total_zero_bytes >= MMAP_WRITE_THRESHOLD && ranges.range_count() == 1 {
+                return self.zero_ranges_mmap(ranges, progress_cb);
+            }
+
+            // Traditional write-zero path for non-Windows
+            let zeros = get_zero_buffer();
+
+            for (start, end) in ranges.iter() {
+                let file_offset = start * (self.block_size as u64);
+                let mut remaining = ((end - start) as usize) * self.block_size;
+
+                self.file.seek(SeekFrom::Start(file_offset))?;
+
+                while remaining > 0 {
+                    let chunk = remaining.min(zeros.len());
+                    self.file.write_all(&zeros[..chunk])?;
+                    remaining -= chunk;
+                    if chunk.is_multiple_of(self.block_size) {
                         progress_cb((chunk / self.block_size) as u64);
                     }
                 }
@@ -632,56 +662,29 @@ impl BlockFile {
             return Ok(());
         }
 
-        // Try mmap zero for large contiguous ranges
-        let total_zero_bytes: usize = ranges.iter()
-            .map(|(s, e)| ((e - s) as usize) * self.block_size)
-            .sum();
-        
-        if total_zero_bytes >= MMAP_WRITE_THRESHOLD && ranges.range_count() == 1 {
-            return self.zero_ranges_mmap(ranges, progress_cb);
-        }
-
-        // Non-Windows: traditional write-zero path
-        let zeros = get_zero_buffer();
-
-        for (start, end) in ranges.iter() {
-            let file_offset = start * (self.block_size as u64);
-            let mut remaining = ((end - start) as usize) * self.block_size;
-
-            self.file.seek(SeekFrom::Start(file_offset))?;
-
-            while remaining > 0 {
-                let chunk = remaining.min(zeros.len());
-                self.file.write_all(&zeros[..chunk])?;
-                remaining -= chunk;
-                if chunk.is_multiple_of(self.block_size) {
-                    progress_cb((chunk / self.block_size) as u64);
-                }
-            }
-        }
-        Ok(())
+        // This line is only reached on Windows when the Windows block above is active,
+        // but we already returned inside that block. This is a compile-time conditional.
+        #[cfg(not(target_os = "windows"))]
+        return Ok(());
     }
 
     /// Mmap-based zero fill for large ranges (much faster than write-zero).
-    /// 
+    ///
     /// CRITICAL: Uses synchronous flush to ensure Bit-Exact consistency.
+    #[cfg(not(target_os = "windows"))]
     fn zero_ranges_mmap<F>(&mut self, ranges: &RangeSet, mut progress_cb: F) -> Result<()>
     where
         F: FnMut(u64),
     {
         let mut mmap = unsafe { memmap2::MmapMut::map_mut(&self.file)? };
-        
+
         for (start, end) in ranges.iter() {
             let file_offset = (start as usize) * self.block_size;
             let total_len = ((end - start) as usize) * self.block_size;
 
             // Fill with zeroes using memset (libc)
             unsafe {
-                std::ptr::write_bytes(
-                    mmap.as_mut_ptr().add(file_offset),
-                    0,
-                    total_len,
-                );
+                std::ptr::write_bytes(mmap.as_mut_ptr().add(file_offset), 0, total_len);
             }
 
             progress_cb(end - start);
@@ -690,7 +693,7 @@ impl BlockFile {
         // CRITICAL FIX: Synchronous flush ensures Bit-Exact consistency
         mmap.flush().context("sync flush of mmap zero")?;
         self.file.sync_data().context("sync_data after mmap zero")?;
-        
+
         Ok(())
     }
 

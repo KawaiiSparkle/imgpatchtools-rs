@@ -15,10 +15,10 @@
 
 use super::bspatch_zero;
 use super::imgdiff_format::{
-    parse_gzip_header_len, parse_imgdiff_patch, DeflateParams, ImgdiffChunk,
+    DeflateParams, ImgdiffChunk, parse_gzip_header_len, parse_imgdiff_patch,
 };
 use super::zlib_raw;
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use flate2::{Decompress, FlushDecompress};
 
 // ---------------------------------------------------------------------------

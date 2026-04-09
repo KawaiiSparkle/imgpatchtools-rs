@@ -55,4 +55,4 @@ overflow-checks = false
 lto = "thin"
 codegen-units = 16
 strip = "symbols"
-incremental = false
+incremental = true

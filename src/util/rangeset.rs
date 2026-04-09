@@ -15,7 +15,7 @@
 
 use std::fmt;
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 
 // ---------------------------------------------------------------------------
 // Range — a single half-open [start, end) pair
@@ -116,7 +116,10 @@ impl RangeSet {
 
         let count: usize = tokens[0].parse().context("invalid range count token")?;
 
-        ensure!(count.is_multiple_of(2), "range count must be even, got {count}");
+        ensure!(
+            count.is_multiple_of(2),
+            "range count must be even, got {count}"
+        );
         ensure!(
             tokens.len() == count + 1,
             "expected {} tokens after count, found {}",

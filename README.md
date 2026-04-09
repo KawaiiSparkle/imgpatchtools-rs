@@ -134,9 +134,62 @@ imgpatchtools-rs blockimg range-sha1 system.img "4,0,10,20,30"
 # Computed: e4c514166c64863dcfb97bfaa277efa8240c6115
 ```
 
-### 5. Unpack a `super.img`
+### 5. Build a `super.img` from Partition Images
+
+**IMPORTANT: LP Version Detection**
+
+Super images use LP (Logical Partition) metadata which has different versions across Android releases:
+- **v10.0**: Android 10 (Q) - Basic dynamic partitions
+- **v10.1**: Android 11 (R) - Adds UPDATED partition attribute  
+- **v10.2**: Android 12+ (S/T/U) - Adds Virtual A/B support
+
+For reliable results, you **MUST** extract the LP version from your device's original super partition:
+
+```bash
+# Step 1: Extract LP metadata using this tool's lpdump command
+# (Requires root access to read /dev/block/by-name/super or a dumped super.img)
+adb shell "su -c 'cat /dev/block/by-name/super'" > device_super.img
+imgpatchtools-rs lpdump device_super.img
+
+# Look for "Version:" in the output
+# Output example: "Version: v10.2"
+```
+
+**Build super.img with manually specified version (RECOMMENDED):**
+
+```bash
+# For Android 12+ device (v10.2)
+imgpatchtools-rs lpmake \
+  --device-size 8589934592 \
+  --partition system:1073741824:system.img \
+  --partition vendor:536870912:vendor.img \
+  --metadata-max-size 65536 \
+  --metadata-slots 2 \
+  --lp-version 10.2 \
+  -o super.img
+
+# For Android 10 device (v10.0) - omit version flag for default
+imgpatchtools-rs lpmake \
+  --device-size 8589934592 \
+  --partition system:1073741824:system.img \
+  --partition vendor:536870912:vendor.img \
+  -o super.img
+```
+
+**Note**: This tool only supports **RAW** format output. If you need sparse format for fastboot flashing, convert manually:
+```bash
+img2simg super.img super_sparse.img
+```
+
+### 6. Unpack a `super.img`
 
 Extract all logical partition images from a `super.img`.
+
+**Note**: Only RAW format super images are supported. Convert sparse images first:
+```bash
+simg2img super_sparse.img super_raw.img
+imgpatchtools-rs lpunpack super_raw.img -o ./unpacked_partitions
+```
 
 ```bash
 imgpatchtools-rs lpunpack super.img -o ./unpacked_partitions

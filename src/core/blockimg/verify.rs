@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 
 use crate::core::blockimg::transfer_list::parse_transfer_list;
 use crate::util::hash;
