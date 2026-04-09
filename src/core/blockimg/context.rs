@@ -1,13 +1,8 @@
 use crate::util::io::BlockFile;
 use crate::util::progress::ProgressReporter;
 use crate::util::rangeset::RangeSet;
-<<<<<<< HEAD
-use anyhow::{Context, Result, ensure};
-use crossbeam_channel::{Receiver, Sender, bounded};
-=======
-use anyhow::{ensure, Result};
-use crossbeam_queue::ArrayQueue;
->>>>>>> parent of fcbdcef (feat: add NewDataReader abstraction with switch mechanism)
+use anyhow::{ensure, Context, Result};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use std::borrow::Cow;
 use std::fs::File;
 use std::io::{self, Read};
@@ -15,88 +10,30 @@ use std::sync::Arc;
 use std::thread;
 
 /// Buffer size for producer-consumer channel (64 MiB chunks).
-/// Increased from 4 MiB to match modern SSD optimal transfer size
-/// and reduce channel handoff overhead for large OTA files.
 const CHANNEL_CHUNK_SIZE: usize = 64 * 1024 * 1024;
 
-/// Number of buffers in the memory pool (triple buffering).
-/// Allows decompressor to run ahead while main thread writes.
-const NUM_POOL_BUFFERS: usize = 3;
+/// Channel capacity - number of in-flight chunks.
+/// Larger queue allows decompressor to run further ahead.
+const CHANNEL_CAPACITY: usize = 8;
 
 /// Decompression read buffer size (512 KiB).
-/// Larger than the default to reduce syscall overhead during
-/// decompression of compressed OTA data.
 const DECOMP_BUF_SIZE: usize = 512 * 1024;
 
-/// Memory pool for reusable buffers - eliminates heap allocation.
-struct BufferPool {
-    buffers: Arc<ArrayQueue<Vec<u8>>>,
-    acquired_count: AtomicUsize,
-}
-
-impl BufferPool {
-    fn new() -> Self {
-        let buffers = Arc::new(ArrayQueue::new(NUM_POOL_BUFFERS));
-        for _ in 0..NUM_POOL_BUFFERS {
-            let _ = buffers.push(vec![0u8; CHANNEL_CHUNK_SIZE]);
-        }
-        Self {
-            buffers,
-            acquired_count: AtomicUsize::new(0),
-        }
-    }
-
-    /// Acquire a buffer from the pool.
-    /// Returns zero-initialized buffer to ensure Bit-Exact safety.
-    fn acquire(&self) -> Vec<u8> {
-        match self.buffers.pop() {
-            Some(buf) => {
-                self.acquired_count.fetch_add(1, Ordering::Relaxed);
-                // Buffer is already zero-initialized from pool creation
-                // and was cleared on release, safe to use
-                buf
-            }
-            None => {
-                // Pool exhausted, allocate new zero-initialized buffer
-                vec![0u8; CHANNEL_CHUNK_SIZE]
-            }
-        }
-    }
-
-    /// Return a buffer to the pool for reuse.
-    /// Clears content for security and Bit-Exact safety.
-    fn release(&self, mut buf: Vec<u8>) {
-        // Zero the buffer before returning to pool
-        // This ensures no stale data leaks between chunks
-        buf.fill(0);
-        buf.clear();
-        // Only keep buffers that match expected size
-        if buf.capacity() >= CHANNEL_CHUNK_SIZE {
-            let _ = self.buffers.push(buf);
-        }
-        // Otherwise drop it
-    }
-}
-
 /// Background thread decompressor for new data.
-/// Uses lock-free ring buffer for zero-copy data transfer.
+/// Uses bounded channel for natural backpressure (sender blocks when full).
 pub struct ParallelNewDataReader {
-    /// Lock-free queue for data chunks.
-    receiver: Arc<ArrayQueue<Vec<u8>>>,
+    /// Bounded channel receiver for data chunks.
+    receiver: Receiver<Vec<u8>>,
     /// Current buffer being consumed.
     buffer: Vec<u8>,
     /// Position in current buffer.
     buffer_pos: usize,
     /// Total bytes received.
     total_received: usize,
-    /// Buffer pool for memory reuse.
-    pool: Arc<BufferPool>,
     /// Background thread handle.
     _thread_handle: Option<std::thread::JoinHandle<()>>,
     /// 诊断信息：后台线程解压的总字节数
     pub diag_bytes_decompressed: Arc<std::sync::atomic::AtomicU64>,
-    /// 诊断信息：队列满次数（后台线程等待）
-    pub diag_queue_full_count: Arc<std::sync::atomic::AtomicU64>,
     /// 诊断信息：后台线程是否已完成
     pub diag_thread_finished: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -150,37 +87,21 @@ impl ParallelNewDataReader {
             file_path.display()
         );
 
-<<<<<<< HEAD
         // Create bounded channel for backpressure
         // Sender blocks when full instead of dropping data
         let (tx, rx) = bounded::<Vec<u8>>(CHANNEL_CAPACITY);
-
-=======
-        // Create shared buffer pool and queue
-        let pool = Arc::new(BufferPool::new());
-        let queue = Arc::new(ArrayQueue::<Vec<u8>>::new(NUM_POOL_BUFFERS));
-        let pool_clone = Arc::clone(&pool);
-        let queue_clone = Arc::clone(&queue);
         
->>>>>>> parent of fcbdcef (feat: add NewDataReader abstraction with switch mechanism)
         // 创建诊断统计
         let diag_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let diag_full = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let diag_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let diag_bytes_clone = Arc::clone(&diag_bytes);
-        let diag_full_clone = Arc::clone(&diag_full);
         let diag_finished_clone = Arc::clone(&diag_finished);
 
         // Spawn background thread for decompression
         let handle = thread::spawn(move || {
-<<<<<<< HEAD
-            let result = Self::decompressor_thread(file_path, ext, tx, diag_bytes_clone);
-=======
-            let result = Self::decompressor_thread_with_diag(
-                file_path, ext, pool_clone, queue_clone,
-                diag_bytes_clone, diag_full_clone
+            let result = Self::decompressor_thread(
+                file_path, ext, tx, diag_bytes_clone
             );
->>>>>>> parent of fcbdcef (feat: add NewDataReader abstraction with switch mechanism)
             if let Err(e) = result {
                 log::error!("background decompressor thread failed: {}", e);
             }
@@ -189,24 +110,23 @@ impl ParallelNewDataReader {
         });
 
         Ok(Self {
-            receiver: queue,
+            receiver: rx,
             buffer: Vec::new(),
             buffer_pos: 0,
             total_received: 0,
-            pool,
             _thread_handle: Some(handle),
             diag_bytes_decompressed: diag_bytes,
-            diag_queue_full_count: diag_full,
             diag_thread_finished: diag_finished,
         })
     }
 
-    /// Background thread: decompress data and send through queue.
+    /// Background thread: decompress data and send through channel.
+    /// Sender blocks when channel is full (natural backpressure).
     fn decompressor_thread(
         path: std::path::PathBuf,
         ext: String,
-        pool: Arc<BufferPool>,
-        queue: Arc<ArrayQueue<Vec<u8>>>,
+        sender: Sender<Vec<u8>>,
+        bytes_decompressed: Arc<std::sync::atomic::AtomicU64>,
     ) -> Result<()> {
         let file = File::open(&path)?;
 
@@ -236,118 +156,21 @@ impl ParallelNewDataReader {
             }
         };
 
-<<<<<<< HEAD
         // Read and send chunks - sender blocks when channel is full
         let mut total_decompressed: u64 = 0;
-
-=======
-        // Read and send chunks using memory pool
->>>>>>> parent of fcbdcef (feat: add NewDataReader abstraction with switch mechanism)
-        loop {
-            let mut chunk = pool.acquire();
-            match reader.read(&mut chunk) {
-                Ok(0) => {
-                    // Return unused buffer to pool
-                    pool.release(chunk);
-                    break;
-                } // EOF
-                Ok(n) => {
-                    chunk.truncate(n);
-<<<<<<< HEAD
-                    total_decompressed += n as u64;
-
-                    // Block until channel has space (never drops data)
-                    if sender.send(chunk).is_err() {
-                        log::error!("decompressor: channel closed, stopping");
-                        break;
-=======
-                    // Spin-wait briefly if queue is full (backpressure)
-                    let mut retries = 0;
-                    while let Err(c) = queue.push(chunk) {
-                        chunk = c;
-                        if retries > 1000 {
-                            log::error!("decompressor: queue full, dropping data");
-                            break;
-                        }
-                        std::thread::yield_now();
-                        retries += 1;
->>>>>>> parent of fcbdcef (feat: add NewDataReader abstraction with switch mechanism)
-                    }
-                }
-                Err(e) => {
-                    log::error!("background decompressor read error: {}", e);
-                    break;
-                }
-            }
-        }
-
-        log::debug!("background decompressor thread finished");
-        Ok(())
-    }
-    
-    /// 带诊断信息的后台线程版本
-    fn decompressor_thread_with_diag(
-        path: std::path::PathBuf,
-        ext: String,
-        pool: Arc<BufferPool>,
-        queue: Arc<ArrayQueue<Vec<u8>>>,
-        bytes_decompressed: Arc<std::sync::atomic::AtomicU64>,
-        queue_full_count: Arc<std::sync::atomic::AtomicU64>,
-    ) -> Result<()> {
-        let file = File::open(&path)?;
-
-        let mut reader: Box<dyn Read + Send> = match ext.as_str() {
-            "br" => {
-                log::info!(
-                    "background: using Brotli decompressor (buf={} KiB)",
-                    DECOMP_BUF_SIZE / 1024
-                );
-                Box::new(brotli::Decompressor::new(file, DECOMP_BUF_SIZE))
-            }
-            "lzma" | "xz" => {
-                log::info!(
-                    "background: using XZ/LZMA decompressor (buf={} KiB)",
-                    DECOMP_BUF_SIZE / 1024
-                );
-                Box::new(xz2::read::XzDecoder::new(
-                    std::io::BufReader::with_capacity(DECOMP_BUF_SIZE, file),
-                ))
-            }
-            _ => {
-                log::info!(
-                    "background: using raw file reader (buf={} KiB)",
-                    DECOMP_BUF_SIZE / 1024
-                );
-                Box::new(std::io::BufReader::with_capacity(DECOMP_BUF_SIZE, file))
-            }
-        };
-
-        // Read and send chunks using memory pool
-        let mut total_decompressed: u64 = 0;
-        let mut full_count: u64 = 0;
         
         loop {
-            let mut chunk = pool.acquire();
+            let mut chunk = vec![0u8; CHANNEL_CHUNK_SIZE];
             match reader.read(&mut chunk) {
-                Ok(0) => {
-                    pool.release(chunk);
-                    break;
-                }
+                Ok(0) => break, // EOF
                 Ok(n) => {
                     chunk.truncate(n);
                     total_decompressed += n as u64;
                     
-                    // Spin-wait briefly if queue is full (backpressure)
-                    let mut retries = 0;
-                    while let Err(c) = queue.push(chunk) {
-                        chunk = c;
-                        full_count += 1;
-                        if retries > 1000 {
-                            log::error!("decompressor: queue full, dropping data");
-                            break;
-                        }
-                        std::thread::yield_now();
-                        retries += 1;
+                    // Block until channel has space (never drops data)
+                    if sender.send(chunk).is_err() {
+                        log::error!("decompressor: channel closed, stopping");
+                        break;
                     }
                 }
                 Err(e) => {
@@ -357,50 +180,30 @@ impl ParallelNewDataReader {
             }
         }
 
-        // 更新诊断统计
+        // Update diagnostic stats
         bytes_decompressed.store(total_decompressed, std::sync::atomic::Ordering::SeqCst);
-<<<<<<< HEAD
-
-=======
-        queue_full_count.store(full_count, std::sync::atomic::Ordering::SeqCst);
         
->>>>>>> parent of fcbdcef (feat: add NewDataReader abstraction with switch mechanism)
         log::info!(
-            "background thread stats: decompressed {} MB, queue full {} times",
-            total_decompressed / 1_048_576,
-            full_count
+            "background thread: decompressed {} MB",
+            total_decompressed / 1_048_576
         );
         Ok(())
     }
 
-    /// Fill internal buffer from queue.
+    /// Fill internal buffer from channel.
     fn refill_buffer(&mut self) -> Result<()> {
-        // Spin-wait briefly for data (reduces latency)
-        let mut retries = 0;
-        loop {
-            match self.receiver.pop() {
-                Some(chunk) => {
-                    self.total_received += chunk.len();
-                    // Return old buffer to pool for reuse
-                    if !self.buffer.is_empty() {
-                        self.pool.release(std::mem::take(&mut self.buffer));
-                    }
-                    self.buffer = chunk;
-                    self.buffer_pos = 0;
-                    return Ok(());
-                }
-                None => {
-                    if retries > 10000 {
-                        return Err(io::Error::new(
-                            io::ErrorKind::UnexpectedEof,
-                            "background decompressor channel closed",
-                        )
-                        .into());
-                    }
-                    std::thread::yield_now();
-                    retries += 1;
-                }
+        match self.receiver.recv() {
+            Ok(chunk) => {
+                self.total_received += chunk.len();
+                self.buffer = chunk;
+                self.buffer_pos = 0;
+                Ok(())
             }
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "background decompressor channel closed",
+            )
+            .into()),
         }
     }
 
@@ -450,7 +253,7 @@ impl ParallelNewDataReader {
         self.buffer_pos += to_skip;
         remaining -= to_skip;
 
-        // Then skip whole chunks from queue
+        // Then skip whole chunks from channel
         while remaining >= CHANNEL_CHUNK_SIZE {
             self.refill_buffer()?;
             let to_skip = remaining.min(self.buffer.len());
@@ -471,82 +274,40 @@ impl ParallelNewDataReader {
     pub fn bytes_received(&self) -> usize {
         self.total_received
     }
-<<<<<<< HEAD
-
+    
     /// Print diagnostics report
     pub fn report_diagnostics(&self) {
-        let decompressed = self
-            .diag_bytes_decompressed
-            .load(std::sync::atomic::Ordering::SeqCst);
-        let finished = self
-            .diag_thread_finished
-            .load(std::sync::atomic::Ordering::SeqCst);
-
-        log::info!("=== ParallelNewDataReader Diagnostics ===");
-        log::info!(
-            "Thread status: {}",
-            if finished { "completed" } else { "running" }
-        );
-        log::info!(
-            "Decompressed: {} ({} MB)",
-            decompressed,
-            decompressed / 1_048_576
-        );
-        log::info!(
-            "Consumed: {} ({} MB)",
-            self.total_received,
-            self.total_received / 1_048_576
-        );
-
-=======
-    
-    /// 打印多线程诊断报告
-    pub fn report_diagnostics(&self) {
         let decompressed = self.diag_bytes_decompressed.load(std::sync::atomic::Ordering::SeqCst);
-        let full_count = self.diag_queue_full_count.load(std::sync::atomic::Ordering::SeqCst);
         let finished = self.diag_thread_finished.load(std::sync::atomic::Ordering::SeqCst);
         
-        log::info!("=== ParallelNewDataReader 诊断报告 ===");
-        log::info!("后台线程状态: {}", if finished { "已完成" } else { "运行中" });
-        log::info!("后台解压字节数: {} ({} MB)", decompressed, decompressed / 1_048_576);
-        log::info!("主线程消费字节数: {} ({} MB)", self.total_received, self.total_received / 1_048_576);
-        log::info!("队列满次数 (后台等待): {}", full_count);
+        log::info!("=== ParallelNewDataReader Diagnostics ===");
+        log::info!("Thread status: {}", if finished { "completed" } else { "running" });
+        log::info!("Decompressed: {} ({} MB)", decompressed, decompressed / 1_048_576);
+        log::info!("Consumed: {} ({} MB)", self.total_received, self.total_received / 1_048_576);
         
->>>>>>> parent of fcbdcef (feat: add NewDataReader abstraction with switch mechanism)
         if decompressed > 0 {
             let ratio = (self.total_received as f64) / (decompressed as f64);
-            log::info!("消费/解压比例: {:.2}%", ratio * 100.0);
+            log::info!("Consumption ratio: {:.2}%", ratio * 100.0);
         }
-
+        
         if finished && decompressed == self.total_received as u64 {
-            log::info!("✓ 多线程工作正常：所有解压数据已被消费");
+            log::info!("OK: All decompressed data consumed");
         } else if finished && decompressed != self.total_received as u64 {
-<<<<<<< HEAD
-            log::warn!(
-                "MISMATCH: decompressed {} MB, consumed {} MB",
-                decompressed / 1_048_576,
-                self.total_received / 1_048_576
-            );
-=======
-            log::warn!("✗ 数据不匹配：解压 {} MB，消费 {} MB", 
+            log::warn!("MISMATCH: decompressed {} MB, consumed {} MB", 
                 decompressed / 1_048_576, self.total_received / 1_048_576);
->>>>>>> parent of fcbdcef (feat: add NewDataReader abstraction with switch mechanism)
         } else {
-            log::info!("? 后台线程仍在运行或尚未完成");
+            log::info!("Thread still running or not finished");
         }
     }
 }
 
 impl Drop for ParallelNewDataReader {
     fn drop(&mut self) {
-        // Return final buffer to pool
-        if !self.buffer.is_empty() {
-            self.pool.release(std::mem::take(&mut self.buffer));
-        }
+        // Channel is automatically closed when sender is dropped
     }
 }
 
-/// Legacy non-parallel reader for compatibility.
+// Legacy non-parallel reader for compatibility.
 pub struct NewDataReader {
     reader: Box<dyn Read>,
 }
@@ -643,6 +404,7 @@ impl NewDataReader {
     }
 }
 
+/// Patch data reader using memory mapping for zero-copy access.
 pub struct PatchDataReader {
     mmap: Option<memmap2::Mmap>,
 }
@@ -680,6 +442,7 @@ impl PatchDataReader {
     }
 }
 
+/// Command execution context.
 pub struct CommandContext {
     pub version: u32,
     pub block_size: usize,
@@ -691,10 +454,6 @@ pub struct CommandContext {
     pub written_blocks: u64,
     pub progress: Box<dyn ProgressReporter>,
     pub blocks_advanced_this_cmd: u64,
-    
-    /// Reusable buffer for patch application output.
-    /// Eliminates per-command allocations by reusing the same Vec.
-    /// This matches C++ `CommandParameters.buffer` behavior.
     pub(crate) reuse_buffer: Vec<u8>,
 }
 
@@ -721,39 +480,24 @@ impl CommandContext {
             written_blocks: 0,
             progress,
             blocks_advanced_this_cmd: 0,
-            reuse_buffer: Vec::new(),  // Start empty, will grow on first use
+            reuse_buffer: Vec::new(),
         }
     }
-    
-    /// Get a reference to the reusable buffer, ensuring it has at least
-    /// `min_capacity` bytes available. The buffer is NOT zeroed - caller
-    /// must initialize contents before use.
-    ///
-    /// This matches C++ `allocate(size, buffer)` behavior.
+
     pub fn get_reuse_buffer(&mut self, min_capacity: usize) -> &mut Vec<u8> {
         if self.reuse_buffer.capacity() < min_capacity {
-<<<<<<< HEAD
-            self.reuse_buffer
-                .reserve(min_capacity - self.reuse_buffer.capacity());
-=======
-            // Need to grow - reserve exact amount to avoid overallocation
             self.reuse_buffer.reserve(min_capacity - self.reuse_buffer.capacity());
->>>>>>> parent of fcbdcef (feat: add NewDataReader abstraction with switch mechanism)
         }
-        // Set len without initializing - caller must write all bytes
         unsafe {
             self.reuse_buffer.set_len(min_capacity);
         }
         &mut self.reuse_buffer
     }
-    
-    /// Get the reusable buffer as a slice of the given size.
-    /// The buffer is cleared but capacity is preserved for reuse.
+
     pub fn take_reuse_buffer(&mut self, size: usize) -> &mut [u8] {
         self.reuse_buffer.clear();
         if self.reuse_buffer.capacity() < size {
-            self.reuse_buffer
-                .reserve(size - self.reuse_buffer.capacity());
+            self.reuse_buffer.reserve(size - self.reuse_buffer.capacity());
         }
         unsafe {
             self.reuse_buffer.set_len(size);
@@ -761,7 +505,6 @@ impl CommandContext {
         &mut self.reuse_buffer[..size]
     }
 
-<<<<<<< HEAD
     /// Load source blocks with stash support — matches AOSP `LoadSourceBlocks`.
     ///
     /// Loads data from:
@@ -776,14 +519,6 @@ impl CommandContext {
     /// Matches C++ behavior: if a stash fails to load (not found, hash mismatch),
     /// logs a warning and continues. The final verification step will catch
     /// any corruption caused by missing stash data.
-=======
-    /// Load source blocks into a contiguous buffer for patch application.
-    ///
-    /// This is the standard path for bsdiff/imgdiff which require all source
-    /// data as a single contiguous buffer. For simple move operations without
-    /// stash refs, prefer [`load_src_blocks_cow`](Self::load_src_blocks_cow)
-    /// to avoid unnecessary copies.
->>>>>>> parent of fcbdcef (feat: add NewDataReader abstraction with switch mechanism)
     pub fn load_src_blocks(
         &mut self,
         ranges: &RangeSet,
@@ -797,13 +532,14 @@ impl CommandContext {
 
         // 1. Load data from source image if available
         // (When there's no source image, we expect all data to come from stashes)
-        if !ranges.is_empty()
-            && let Some(ref src) = self.source {
+        if !ranges.is_empty() {
+            if let Some(ref src) = self.source {
                 let src_data = src.read_ranges(ranges)?;
                 // Copy source data to the beginning of result buffer
                 let copy_len = src_data.len().min(total_bytes);
                 result[..copy_len].copy_from_slice(&src_data[..copy_len]);
             }
+        }
 
         // 2. Load data from stashes with fault tolerance
         // Matches C++ behavior: continue even if some stashes fail
@@ -862,17 +598,13 @@ impl CommandContext {
             if dest_offset + byte_len > buffer.len() {
                 anyhow::bail!(
                     "copy_stash_to_buffer: range {}-{} exceeds buffer size {}",
-                    start,
-                    end,
-                    buffer.len()
+                    start, end, buffer.len()
                 );
             }
             if stash_offset + byte_len > stash_data.len() {
                 anyhow::bail!(
                     "copy_stash_to_buffer: not enough stash data (need {} bytes from offset {}, have {})",
-                    byte_len,
-                    stash_offset,
-                    stash_data.len()
+                    byte_len, stash_offset, stash_data.len()
                 );
             }
 
@@ -904,10 +636,14 @@ impl CommandContext {
             // The map defines which source blocks go to which destination blocks
             // For now, we assume sequential mapping
             if src_offset + byte_len > buffer.len() {
-                anyhow::bail!("apply_buffer_map: source range exceeds buffer size");
+                anyhow::bail!(
+                    "apply_buffer_map: source range exceeds buffer size"
+                );
             }
             if result_offset + byte_len > result.len() {
-                anyhow::bail!("apply_buffer_map: destination range exceeds result size");
+                anyhow::bail!(
+                    "apply_buffer_map: destination range exceeds result size"
+                );
             }
 
             result[result_offset..result_offset + byte_len]
@@ -920,8 +656,6 @@ impl CommandContext {
         Ok(result)
     }
 
-    /// Copy-on-write version: returns a reference to stashed data if available,
-    /// otherwise loads from source. Reduces memory copies for stash operations.
     pub fn load_src_blocks_cow<'a>(
         &'a self,
         ranges: &RangeSet,

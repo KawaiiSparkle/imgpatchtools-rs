@@ -33,7 +33,6 @@ fn get_available_memory_mb() -> Option<u64> {
 
     #[repr(C)]
     #[allow(non_snake_case)]
-    #[allow(clippy::upper_case_acronyms)]
     struct MEMORYSTATUSEX {
         dwLength: u32,
         dwMemoryLoad: u32,

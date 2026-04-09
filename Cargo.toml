@@ -43,6 +43,7 @@ regex       = "1"
 libz-sys    = { version = "1", features = ["static"] }
 lru         = "0.16"
 crossbeam-queue = "0.3"
+crossbeam-channel = "0.5.15"
 
 [target.'cfg(unix)'.dependencies]
 libc        = "0.2"

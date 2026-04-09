@@ -17,11 +17,9 @@
 pub mod cli;
 pub mod commands;
 pub mod context;
-<<<<<<< HEAD
 pub mod hash_tree;
+pub mod sync_reader;
 pub mod new_data_reader;
-=======
->>>>>>> parent of fcbdcef (feat: add NewDataReader abstraction with switch mechanism)
 pub mod ops;
 pub mod resume;
 pub mod stash;
