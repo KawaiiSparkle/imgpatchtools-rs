@@ -2,3 +2,4 @@
 *.zip
 /batch_work
 /test
+*.lock
