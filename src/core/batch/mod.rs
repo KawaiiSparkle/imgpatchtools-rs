@@ -444,7 +444,22 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
     timer.print_summary();
 
     // Clean up workdir after successful completion.
+    // Note: If output_dir is inside workdir, we need to move it out first.
     if workdir.exists() {
+        let output_in_workdir = output_dir.starts_with(workdir);
+        let final_output_path = if output_in_workdir {
+            // Move output to a temporary location outside workdir first
+            let temp_output = Path::new(&config.workdir).join("../.imgpatchtools-output-temp");
+            if temp_output.exists() {
+                let _ = fs::remove_dir_all(&temp_output);
+            }
+            fs::rename(output_dir, &temp_output)
+                .with_context(|| format!("failed to move output to temp location"))?;
+            Some(temp_output)
+        } else {
+            None
+        };
+
         log::info!(
             "cleaning up workdir after successful batch: {}",
             workdir.display()
@@ -453,6 +468,14 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
             log::warn!("failed to clean up workdir: {}", e);
         } else {
             println!("  Cleaned up workdir: {}", workdir.display());
+        }
+
+        // Move output back to its intended location
+        if let Some(temp_path) = final_output_path {
+            fs::create_dir_all(workdir.parent().unwrap_or(Path::new(".")))
+                .with_context(|| format!("failed to create parent directory for output"))?;
+            fs::rename(&temp_path, output_dir)
+                .with_context(|| format!("failed to move output to final location"))?;
         }
     }
 
@@ -535,6 +558,7 @@ fn cleanup_workdir(ota_dir: &Path) -> Result<()> {
     // Allowed file patterns:
     // - *.*.dat.* (system.new.dat.br, etc.)
     // - *.transfer.list
+    // - dynamic_partitions_op_list
     // - boot.img.p
     // - boot.img
     // - update-script
@@ -546,6 +570,10 @@ fn cleanup_workdir(ota_dir: &Path) -> Result<()> {
         }
         // Check for *.transfer.list
         if filename.ends_with(".transfer.list") {
+            return true;
+        }
+        // Check for dynamic_partitions_op_list (needed for super.img building)
+        if filename == "dynamic_partitions_op_list" {
             return true;
         }
         // Check for *.img files (needed for incremental OTA chaining)
