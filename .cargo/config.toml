@@ -8,7 +8,7 @@
 #   cargo build --release --target x86_64-unknown-linux-musl  → Linux static
 
 [build]
-jobs = 8
+jobs = 16
 
 # ========== Linux - 完全静态链接 (musl) ==========
 [target.x86_64-unknown-linux-musl]
