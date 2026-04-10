@@ -369,20 +369,20 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
         // Update version tracking
         println!("  {} partitions processed successfully.", success_count);
 
-        // Track dynamic partitions BEFORE cleanup (cleanup removes the op_list file!)
-        let script_path = workdir.join("META-INF/com/google/android/updater-script");
-        if script_path.exists() {
+        // Track dynamic partitions BEFORE cleanup
+        if let Ok(script_path) = find_updater_script(workdir) {
             let script_content = fs::read_to_string(&script_path).unwrap_or_default();
             if script_content.contains("update_dynamic_partitions") {
-                // Try to parse from the workdir
                 let op_list_path = workdir.join("dynamic_partitions_op_list");
                 if op_list_path.exists() {
                     if let Ok(content) = fs::read_to_string(&op_list_path) {
                         if let Ok(dp) = crate::core::super_img::op_list::parse_op_list(&content) {
                             last_dp = Some(dp);
-                            log::info!("dynamic partitions detected and saved for super.img build");
+                            println!("  Dynamic partitions detected — layout cached for super.img build.");
                         }
                     }
+                } else {
+                    println!("  WARNING: updater-script references dynamic partitions but op_list not found.");
                 }
             }
         }
@@ -505,8 +505,8 @@ fn extract_ota_zip(zip_path: &Path, workdir: &Path) -> Result<()> {
         }
         Err(e) => {
             bail!(
-                "failed to run 7z (is it installed?): {}\n\
-                 Please install 7-Zip: https://www.7-zip.org/",
+                "failed to run 7z (is it installed and Configure in Environment Variables?): {}\n\
+                 Please install 7-Zip: https://github.com/ip7z/7zip/releases/latest",
                 e
             );
         }
@@ -527,9 +527,9 @@ fn rollback_versioned_files(workdir: &Path, version: usize) -> Result<()> {
         }
         
         let filename = entry.file_name().to_string_lossy().into_owned();
-        // Delete files with this version suffix
+        // Delete files with this version suffix, but keep dynamic_partitions_op_list
         let suffix = format!(".{}.img", version);
-        if filename.ends_with(&suffix) {
+        if filename.ends_with(&suffix) && filename != "dynamic_partitions_op_list" {
             fs::remove_file(&path)
                 .with_context(|| format!("remove failed version file {}", path.display()))?;
             log::info!("rolled back: deleted {}", path.display());
