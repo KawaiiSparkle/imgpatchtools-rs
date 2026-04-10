@@ -51,11 +51,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-
+          
       # Linux musl 编译工具
       - name: Install musl tools
         if: endsWith(matrix.target, '-musl')
