@@ -369,7 +369,7 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
         // Update version tracking
         println!("  {} partitions processed successfully.", success_count);
 
-        // Track dynamic partitions BEFORE cleanup
+        // Track dynamic partitions BEFORE cleanup (must be before cleanup_after_processing!)
         if let Ok(script_path) = find_updater_script(workdir) {
             let script_content = fs::read_to_string(&script_path).unwrap_or_default();
             if script_content.contains("update_dynamic_partitions") {
@@ -377,7 +377,7 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
                 if op_list_path.exists() {
                     if let Ok(content) = fs::read_to_string(&op_list_path) {
                         if let Ok(dp) = crate::core::super_img::op_list::parse_op_list(&content) {
-                            last_dp = Some(dp);
+                            last_dp = Some(merge_dynamic_partitions(last_dp, dp));
                             println!("  Dynamic partitions detected — layout cached for super.img build.");
                         }
                     }
@@ -387,8 +387,14 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
             }
         }
         
-        // Clean up temporary files and old versions
-        timer.start(format!("OTA #{} - Cleanup", pkg.index));
+        // Clean up temporary files (transfer lists, patch files, etc.)
+        // This is done AFTER dynamic partition detection to ensure op_list is available
+        timer.start(format!("OTA #{} - Cleanup temp files", pkg.index));
+        cleanup_after_processing(workdir)?;
+        timer.end();
+        
+        // Clean up old versioned files
+        timer.start(format!("OTA #{} - Cleanup old versions", pkg.index));
         cleanup_versioned_workdir(workdir, current_version)?;
         timer.end();
 
@@ -397,24 +403,29 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
         println!();
     }
 
+    // Final output directory: current directory + "output"
+    let final_output = Path::new("output");
+    fs::create_dir_all(final_output)
+        .with_context(|| format!("create output dir {}", final_output.display()))?;
+
     // Build super.img if dynamic partitions were detected
     if !config.no_super {
         if let Some(ref dp) = last_dp {
             println!();
             println!("  Dynamic partitions detected — building super.img...");
             timer.start("Build super.img");
-            build_super_from_batch(dp, workdir, workdir, config)?;
+
+            // Create symlinks for partition images so super builder can find them
+            let linked = link_partition_images_for_super(workdir, current_version - 1)?;
+            println!("  Linked {} partition images for super build", linked.len());
+
+            build_super_from_batch(dp, workdir, final_output, config)?;
             timer.end();
         } else {
             println!();
             println!("  No dynamic partitions detected — skipping super.img build.");
         }
     }
-
-    // Final output directory: current directory + "output"
-    let final_output = Path::new("output");
-    fs::create_dir_all(final_output)
-        .with_context(|| format!("create output dir {}", final_output.display()))?;
 
     println!("══════════════════════════════════════════════════════");
     println!("  Moving final images to: {}", final_output.display());
@@ -528,7 +539,7 @@ fn rollback_versioned_files(workdir: &Path, version: usize) -> Result<()> {
         
         let filename = entry.file_name().to_string_lossy().into_owned();
         // Delete files with this version suffix, but keep dynamic_partitions_op_list
-        let suffix = format!(".{}.img", version);
+        let suffix = format!(".img.{}", version);
         if filename.ends_with(&suffix) && filename != "dynamic_partitions_op_list" {
             fs::remove_file(&path)
                 .with_context(|| format!("remove failed version file {}", path.display()))?;
@@ -968,6 +979,83 @@ fn file_stem(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// Merge two DynamicPartitionState, keeping the latest version of each partition/group.
+/// Used when processing multiple OTAs to accumulate the final partition layout.
+fn merge_dynamic_partitions(
+    existing: Option<DynamicPartitionState>,
+    new: DynamicPartitionState,
+) -> DynamicPartitionState {
+    let mut result = existing.unwrap_or_else(DynamicPartitionState::new);
+
+    // Merge groups (newer takes precedence)
+    for new_group in new.groups {
+        if let Some(existing) = result.groups.iter_mut().find(|g| g.name == new_group.name) {
+            existing.max_size = new_group.max_size;
+        } else {
+            result.groups.push(new_group);
+        }
+    }
+
+    // Merge partitions (newer takes precedence)
+    for new_part in new.partitions {
+        if let Some(existing) = result.partitions.iter_mut().find(|p| p.name == new_part.name) {
+            existing.group_name = new_part.group_name;
+            existing.size = new_part.size;
+        } else {
+            result.partitions.push(new_part);
+        }
+    }
+
+    result
+}
+
+/// Create symlinks/hardlinks for partition images to make them available for super build.
+/// Links {partition}.img.{version} -> {partition}.img for each partition.
+fn link_partition_images_for_super(workdir: &Path, version: usize) -> Result<Vec<String>> {
+    let mut linked = Vec::new();
+
+    for entry in fs::read_dir(workdir).context("read workdir for super linking")? {
+        let entry = entry.context("read dir entry")?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let filename = entry.file_name().to_string_lossy().into_owned();
+        let expected_suffix = format!(".img.{version}");
+
+        if filename.ends_with(&expected_suffix) {
+            let partition = &filename[..filename.len() - expected_suffix.len()];
+            let target = workdir.join(format!("{partition}.img"));
+
+            // Remove existing target if any
+            if target.exists() {
+                fs::remove_file(&target)?;
+            }
+
+            // Create hard link (Windows) or symlink (Unix)
+            #[cfg(windows)]
+            {
+                fs::copy(&path, &target).with_context(|| {
+                    format!("copy {} -> {}", path.display(), target.display())
+                })?;
+            }
+            #[cfg(not(windows))]
+            {
+                std::os::unix::fs::symlink(&path, &target)
+                    .or_else(|_| fs::copy(&path, &target).map(|_| ()))
+                    .with_context(|| {
+                        format!("link/copy {} -> {}", path.display(), target.display())
+                    })?;
+            }
+
+            linked.push(partition.to_string());
+        }
+    }
+
+    Ok(linked)
+}
+
 // ---------------------------------------------------------------------------
 // New versioned file processing functions
 // ---------------------------------------------------------------------------
@@ -984,10 +1072,10 @@ fn prepare_source_images(workdir: &Path, prev_version: usize) -> Result<()> {
         }
         
         let filename = entry.file_name().to_string_lossy().into_owned();
-        let expected_suffix = format!(".{}.img", prev_version);
+        let expected_suffix = format!(".img.{}", prev_version);
         
         if filename.ends_with(&expected_suffix) {
-            // Extract partition name (e.g., "system.0.img" -> "system")
+            // Extract partition name (e.g., "system.img.0" -> "system")
             let partition = &filename[..filename.len() - expected_suffix.len()];
             let target = workdir.join(format!("{}.img", partition));
             
@@ -1045,8 +1133,8 @@ fn process_partitions_with_version(
             // Script executed successfully - now rename output files to versioned names
             let (promoted, failed) = promote_files_to_version(workdir, target_version)?;
             
-            // Clean up non-versioned files and transfer lists
-            cleanup_after_processing(workdir)?;
+            // Note: cleanup_after_processing is now called AFTER dynamic partition detection
+            // in the main execute_batch loop to ensure op_list is available for parsing.
             
             Ok((promoted.len(), failed.len(), failed))
         }
@@ -1078,14 +1166,16 @@ fn promote_files_to_version(workdir: &Path, version: usize) -> Result<(Vec<Strin
         
         let filename = entry.file_name().to_string_lossy().into_owned();
         
-        // Skip already versioned files and non-.img files
-        if !filename.ends_with(".img") || filename.matches('.').count() > 1 {
+        // Skip already versioned files (*.img.N) and non-.img files
+        let is_versioned = filename.contains(".img.") &&
+            filename.rsplitn(2, '.').next().and_then(|s| s.parse::<usize>().ok()).is_some();
+        if !filename.ends_with(".img") || is_versioned {
             continue;
         }
-        
+
         // Extract partition name (e.g., "system.img" -> "system")
         let partition = &filename[..filename.len() - 4];
-        let versioned_name = format!("{}.{}.img", partition, version);
+        let versioned_name = format!("{}.img.{}", partition, version);
         let versioned_path = workdir.join(&versioned_name);
         
         // Remove old version if exists
@@ -1143,10 +1233,9 @@ fn cleanup_after_processing(workdir: &Path) -> Result<()> {
             }
         });
         
-        // But keep versioned .img files
-        let is_versioned_img = filename.ends_with(".img") && 
-            filename.matches('.').count() >= 2 &&
-            filename.rsplit('.').nth(1).and_then(|s| s.parse::<usize>().ok()).is_some();
+        // But keep versioned .img files (*.img.N)
+        let is_versioned_img = filename.contains(".img.") &&
+            filename.rsplitn(2, '.').next().and_then(|s| s.parse::<usize>().ok()).is_some();
         
         if should_remove && !is_versioned_img {
             if let Err(e) = fs::remove_file(&path) {
@@ -1175,18 +1264,14 @@ fn cleanup_versioned_workdir(workdir: &Path, current_version: usize) -> Result<(
         
         let filename = entry.file_name().to_string_lossy().into_owned();
         
-        // Check if it's a versioned .img file
-        if filename.ends_with(".img") {
-            // Extract version number
-            let stem = path.file_stem().unwrap().to_string_lossy();
-            let parts: Vec<&str> = stem.rsplitn(2, '.').collect();
-            
-            if parts.len() == 2 {
-                if let Ok(version) = parts[0].parse::<usize>() {
-                    if version <= current_version {
-                        // Keep this version
-                        continue;
-                    }
+        // Check if it's a versioned .img file (*.img.N)
+        if let Some(idx) = filename.rfind(".img.") {
+            // Extract version number from after ".img."
+            let version_str = &filename[idx + 5..]; // 5 = len(".img.")
+            if let Ok(version) = version_str.parse::<usize>() {
+                if version <= current_version {
+                    // Keep this version
+                    continue;
                 }
             }
         }
