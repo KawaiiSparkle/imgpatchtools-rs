@@ -292,139 +292,135 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
     println!();
     println!("  Packages:    {}", packages.len());
     println!("  Workdir:     {}", config.workdir);
-    println!("  Output:      {}", config.output_dir);
+    println!("  Output:      ./output");
     println!("  Threads:     {}", config.threads);
     println!();
 
-    let mut prev_workdir: Option<PathBuf> = None;
     let mut last_dp: Option<DynamicPartitionState> = None;
+    let mut current_version: usize = 0; // 0 = full OTA, 1+ = incremental
 
     for pkg in packages {
-        let ota_dir = workdir.join(format!("ota_{:03}", pkg.index));
-        let label = if pkg.is_full {
-            "full OTA"
-        } else {
-            "incremental OTA"
-        };
-
+        let label = if pkg.is_full { "full OTA" } else { "incremental OTA" };
+        
         println!("──────────────────────────────────────────────────");
         println!("[OTA #{}] Processing {} ({})", pkg.index, label, pkg.name);
         println!("  Source: {}", pkg.path.display());
-        println!("  Workdir: {}", ota_dir.display());
+        println!("  Target version: .{}", current_version);
 
-        // Step 1: Extract OTA zip.
-        println!("  [1/4] Extracting...");
+        // Step 1: Extract OTA zip (only needed files, directly to workdir).
+        println!("  [1/3] Extracting required files...");
         timer.start(format!("OTA #{} - Extract", pkg.index));
-        extract_ota_zip(&pkg.path, &ota_dir)
+        extract_ota_zip(&pkg.path, workdir)
             .with_context(|| format!("extract OTA #{} from {}", pkg.index, pkg.path.display()))?;
         timer.end();
 
-        // Step 2: Move source images from previous OTA (for incremental).
-        if let Some(ref prev) = prev_workdir {
-            println!(
-                "  [2/4] Moving source images from OTA #{}...",
-                pkg.index - 1
-            );
-            timer.start(format!("OTA #{} - Move sources", pkg.index));
-            move_source_images(prev, &ota_dir)?;
+        // Step 2: Prepare source images for incremental (create symlinks/copies with .img suffix).
+        if !pkg.is_full {
+            println!("  [2/3] Preparing source images from version .{}...", current_version - 1);
+            timer.start(format!("OTA #{} - Prepare sources", pkg.index));
+            prepare_source_images(workdir, current_version - 1)?;
             timer.end();
         } else {
-            println!("  [2/4] No previous OTA (full package), skipping move.");
+            println!("  [2/3] Full OTA - no source images needed.");
         }
 
-        // Step 3: Save partitions that should be excluded at this step.
-        let excluded = partitions_excluded_at(pkg.index, config);
-        if !excluded.is_empty() {
-            println!("  [3/4] Excluding partitions: {}", excluded.join(", "));
-            timer.start(format!("OTA #{} - Exclude partitions", pkg.index));
-            save_and_exclude_partitions(&excluded, &ota_dir)?;
-            timer.end();
-        } else {
-            println!("  [3/4] No partitions excluded at this step.");
-        }
-
-        // Step 4: Run edify script.
-        println!("  [4/4] Running edify script...");
-        timer.start(format!("OTA #{} - Edify script", pkg.index));
-        let script_path = find_updater_script(&ota_dir)?;
-
-        let script_content = fs::read_to_string(&script_path)
-            .with_context(|| format!("read {}", script_path.display()))?;
-
-        let registry = builtin_registry();
-        let result = run_script_with_mode(
-            &script_content,
-            &registry,
-            &ota_dir.to_string_lossy(),
-            config.verify,
-            true, // Always offline mode: skip device verification
-        )
-        .with_context(|| format!("edify execution for OTA #{}", pkg.index))?;
-        timer.end(); // End edify script timer
-
-        // Restore excluded partitions.
-        if !excluded.is_empty() {
-            timer.start(format!("OTA #{} - Restore excluded", pkg.index));
-            restore_excluded_partitions(&excluded, &ota_dir)?;
-            timer.end();
-        }
-
-        // Run auto recovery patch (recovery-from-boot.p → recovery.img).
-        timer.start(format!("OTA #{} - Recovery patch", pkg.index));
-        crate::core::edify::cli::auto_patch_recovery(&ota_dir.to_string_lossy());
+        // Step 3: Process partitions with version tracking and error handling.
+        println!("  [3/3] Processing partitions...");
+        timer.start(format!("OTA #{} - Process partitions", pkg.index));
+        
+        let (success_count, fail_count, failed_partitions) = process_partitions_with_version(
+            workdir,
+            current_version,
+            config,
+        ).with_context(|| format!("process partitions for OTA #{}", pkg.index))?;
+        
         timer.end();
 
-        // Delete updater script after successful execution.
+        // Check results - if more than one partition failed, stop here
+        if fail_count > 0 {
+            log::error!(
+                "OTA #{}: {} partitions succeeded, {} failed (failed: {:?})",
+                pkg.index, success_count, fail_count, failed_partitions
+            );
+            
+            if fail_count > 1 || pkg.index < packages.len() - 1 {
+                println!();
+                println!("  ERROR: Multiple partitions failed or not the last OTA.");
+                println!("  Failed partitions: {}", failed_partitions.join(", "));
+                println!("  Please fix errors before proceeding to next OTA.");
+                
+                // Write error log
+                let error_log = workdir.join("error.log");
+                let error_content = format!(
+                    "OTA #{} failed partitions: {:?}\n\
+                     Success: {}, Failed: {}\n\
+                     Fix errors before proceeding to next OTA.\n",
+                    pkg.index, failed_partitions, success_count, fail_count
+                );
+                fs::write(&error_log, error_content)?;
+                println!("  Error log written to: {}", error_log.display());
+                
+                bail!("OTA #{} processing failed - fix errors before continuing", pkg.index);
+            } else {
+                println!("  WARNING: One partition failed, but continuing...");
+            }
+        }
+
+        // Update version tracking
+        println!("  {} partitions processed successfully.", success_count);
+        
+        // Clean up temporary files and old versions
+        timer.start(format!("OTA #{} - Cleanup", pkg.index));
+        cleanup_versioned_workdir(workdir, current_version)?;
+        timer.end();
+
+        // Track dynamic partitions
+        let script_path = workdir.join("META-INF/com/google/android/updater-script");
         if script_path.exists() {
-            fs::remove_file(&script_path)
-                .with_context(|| format!("delete updater script {}", script_path.display()))?;
-            log::info!(
-                "deleted updater script after successful execution: {}",
-                script_path.display()
-            );
+            let script_content = fs::read_to_string(&script_path).unwrap_or_default();
+            if script_content.contains("update_dynamic_partitions") {
+                // Try to parse from the workdir
+                let op_list_path = workdir.join("dynamic_partitions_op_list");
+                if op_list_path.exists() {
+                    if let Ok(content) = fs::read_to_string(&op_list_path) {
+                        if let Ok(dp) = crate::core::super_img::op_list::parse_op_list(&content) {
+                            last_dp = Some(dp);
+                        }
+                    }
+                }
+            }
         }
 
-        // Clean up workdir: keep only allowed files.
-        timer.start(format!("OTA #{} - Cleanup workdir", pkg.index));
-        cleanup_workdir(&ota_dir)?;
-        timer.end();
-
-        // Track dynamic partitions.
-        if let Some(ref dp) = result.dynamic_partitions {
-            last_dp = Some(dp.clone());
-        }
-
-        prev_workdir = Some(ota_dir);
-        println!("  OTA #{} completed successfully.", pkg.index);
+        current_version += 1;
+        println!("  OTA #{} completed. Current version: .{}", pkg.index, current_version - 1);
         println!();
     }
 
-    // Move final images to output directory.
-    let final_workdir = prev_workdir.as_ref().context("no OTA packages processed")?;
-    let output_dir = Path::new(&config.output_dir);
-    fs::create_dir_all(output_dir)
-        .with_context(|| format!("create output dir {}", output_dir.display()))?;
-
-    println!("══════════════════════════════════════════════════════");
-    println!("  Moving final images to: {}", output_dir.display());
-
-    timer.start("Move final images");
-    move_final_images(final_workdir, output_dir)?;
-    timer.end();
-
-    // Build super.img if dynamic partitions were detected.
+    // Build super.img if dynamic partitions were detected
     if !config.no_super {
         if let Some(ref dp) = last_dp {
             println!();
             println!("  Dynamic partitions detected — building super.img...");
             timer.start("Build super.img");
-            build_super_from_batch(dp, final_workdir, output_dir, config)?;
+            build_super_from_batch(dp, workdir, workdir, config)?;
             timer.end();
         } else {
             println!();
             println!("  No dynamic partitions detected — skipping super.img build.");
         }
     }
+
+    // Final output directory: current directory + "output"
+    let final_output = Path::new("output");
+    fs::create_dir_all(final_output)
+        .with_context(|| format!("create output dir {}", final_output.display()))?;
+
+    println!("══════════════════════════════════════════════════════");
+    println!("  Moving final images to: {}", final_output.display());
+
+    timer.start("Move final images");
+    move_final_images(workdir, final_output)?;
+    timer.end();
 
     // Record total batch time.
     let total_time = batch_start.elapsed();
@@ -435,31 +431,16 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
     println!("║          Batch OTA Processing Complete               ║");
     println!("╚══════════════════════════════════════════════════════╝");
     println!();
-    println!("  Output directory: {}", output_dir.display());
+    println!("  Output directory: {}", final_output.display());
 
     // List output files.
-    list_output_files(output_dir);
+    list_output_files(final_output);
 
     // Print timing summary.
     timer.print_summary();
 
     // Clean up workdir after successful completion.
-    // Note: If output_dir is inside workdir, we need to move it out first.
     if workdir.exists() {
-        let output_in_workdir = output_dir.starts_with(workdir);
-        let final_output_path = if output_in_workdir {
-            // Move output to a temporary location outside workdir first
-            let temp_output = Path::new(&config.workdir).join("../.imgpatchtools-output-temp");
-            if temp_output.exists() {
-                let _ = fs::remove_dir_all(&temp_output);
-            }
-            fs::rename(output_dir, &temp_output)
-                .with_context(|| format!("failed to move output to temp location"))?;
-            Some(temp_output)
-        } else {
-            None
-        };
-
         log::info!(
             "cleaning up workdir after successful batch: {}",
             workdir.display()
@@ -469,45 +450,57 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
         } else {
             println!("  Cleaned up workdir: {}", workdir.display());
         }
-
-        // Move output back to its intended location
-        if let Some(temp_path) = final_output_path {
-            fs::create_dir_all(workdir.parent().unwrap_or(Path::new(".")))
-                .with_context(|| format!("failed to create parent directory for output"))?;
-            fs::rename(&temp_path, output_dir)
-                .with_context(|| format!("failed to move output to final location"))?;
-        }
     }
 
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// OTA zip extraction
+// OTA zip extraction - only extract needed files
 // ---------------------------------------------------------------------------
 
-fn extract_ota_zip(zip_path: &Path, dest_dir: &Path) -> Result<()> {
-    // Try 7z first (handles various zip formats including Android OTA).
+/// Extract only necessary files from OTA zip to workdir.
+/// Extracts: boot*, *.dat, *.dat.br, *.dat.lzma, *.transfer.list, update-script, dynamic_partitions_op_list
+fn extract_ota_zip(zip_path: &Path, workdir: &Path) -> Result<()> {
+    // Ensure workdir exists
+    fs::create_dir_all(workdir)
+        .with_context(|| format!("create workdir {}", workdir.display()))?;
+
+    // Build 7z command with specific file patterns
     let status = std::process::Command::new("7z")
         .arg("x")
         .arg(zip_path)
-        .arg(format!("-o{}", dest_dir.display()))
+        .arg("-r")
+        .arg("boot*")
+        .arg("*.dat")
+        .arg("*.dat.br")
+        .arg("*.dat.lzma")
+        .arg("*.transfer.list")
+        .arg("update-script")
+        .arg("dynamic_partitions_op_list")
+        .arg(format!("-o{}", workdir.display()))
         .arg("-y")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .status();
 
     match status {
         Ok(s) if s.success() => {
-            log::info!("extracted {} to {}", zip_path.display(), dest_dir.display());
+            log::info!("extracted {} to {}", zip_path.display(), workdir.display());
             Ok(())
         }
         Ok(s) => {
-            bail!(
-                "7z exited with code {:?} while extracting {}",
-                s.code(),
-                zip_path.display()
-            )
+            // 7z returns 2 if some files don't exist, which is OK for optional files
+            if s.code() == Some(2) {
+                log::info!("extracted {} to {} (some optional files not found)", zip_path.display(), workdir.display());
+                Ok(())
+            } else {
+                bail!(
+                    "7z exited with code {:?} while extracting {}",
+                    s.code(),
+                    zip_path.display()
+                )
+            }
         }
         Err(e) => {
             bail!(
@@ -520,30 +513,28 @@ fn extract_ota_zip(zip_path: &Path, dest_dir: &Path) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Source image moving (for incremental OTAs) - moves .img files instead of copying
-// to save disk space (original OTA zips are preserved)
+// Versioned file management
 // ---------------------------------------------------------------------------
 
-fn move_source_images(prev_dir: &Path, ota_dir: &Path) -> Result<()> {
-    for entry in fs::read_dir(prev_dir).context("read previous workdir")? {
+/// Rollback failed version - delete new version files, keep old version
+fn rollback_versioned_files(workdir: &Path, version: usize) -> Result<()> {
+    for entry in fs::read_dir(workdir).context("read workdir")? {
         let entry = entry.context("read dir entry")?;
         let path = entry.path();
         if !path.is_file() {
             continue;
         }
-        // Only move .img files.
-        if path.extension().and_then(|e| e.to_str()) == Some("img") {
-            let dest = ota_dir.join(entry.file_name());
-            // Remove destination if exists, then move.
-            if dest.exists() {
-                fs::remove_file(&dest)
-                    .with_context(|| format!("remove existing {}", dest.display()))?;
-            }
-            fs::rename(&path, &dest)
-                .with_context(|| format!("move {} → {}", path.display(), dest.display()))?;
-            log::info!("moved source: {} → {}", path.display(), dest.display());
+        
+        let filename = entry.file_name().to_string_lossy().into_owned();
+        // Delete files with this version suffix
+        let suffix = format!(".{}.img", version);
+        if filename.ends_with(&suffix) {
+            fs::remove_file(&path)
+                .with_context(|| format!("remove failed version file {}", path.display()))?;
+            log::info!("rolled back: deleted {}", path.display());
         }
     }
+    
     Ok(())
 }
 
@@ -554,6 +545,7 @@ fn move_source_images(prev_dir: &Path, ota_dir: &Path) -> Result<()> {
 /// Clean up workdir after edify execution.
 /// Keeps only: *.*.dat.*, *.transfer.list, *.img, boot.img.p, boot.img, update-script
 /// Note: *.img files are kept for incremental OTA chaining (will be moved to next OTA)
+#[allow(dead_code)]
 fn cleanup_workdir(ota_dir: &Path) -> Result<()> {
     // Allowed file patterns:
     // - *.*.dat.* (system.new.dat.br, etc.)
@@ -643,6 +635,7 @@ fn cleanup_workdir(ota_dir: &Path) -> Result<()> {
 // Partition exclusion (save + restore)
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 fn partitions_excluded_at(ota_index: usize, config: &BatchConfig) -> Vec<String> {
     let mut excluded = Vec::new();
     let exclude_set: HashSet<&String> = config.excludes.iter().collect();
@@ -664,40 +657,6 @@ fn partitions_excluded_at(ota_index: usize, config: &BatchConfig) -> Vec<String>
 
     excluded.sort();
     excluded
-}
-
-fn save_and_exclude_partitions(excluded: &[String], ota_dir: &Path) -> Result<()> {
-    let backup_dir = ota_dir.join(".batch_backup");
-    fs::create_dir_all(&backup_dir).context("create backup dir")?;
-
-    for part in excluded {
-        let img_path = ota_dir.join(format!("{}.img", part));
-        let bak_path = backup_dir.join(format!("{}.img", part));
-        if img_path.exists() {
-            fs::copy(&img_path, &bak_path)
-                .with_context(|| format!("backup {}", img_path.display()))?;
-            log::info!("backed up {}.img for exclusion", part);
-        }
-    }
-    Ok(())
-}
-
-fn restore_excluded_partitions(excluded: &[String], ota_dir: &Path) -> Result<()> {
-    let backup_dir = ota_dir.join(".batch_backup");
-
-    for part in excluded {
-        let img_path = ota_dir.join(format!("{}.img", part));
-        let bak_path = backup_dir.join(format!("{}.img", part));
-        if bak_path.exists() {
-            fs::copy(&bak_path, &img_path)
-                .with_context(|| format!("restore {}", img_path.display()))?;
-            log::info!("restored {}.img after exclusion", part);
-        }
-    }
-
-    // Clean up backup directory.
-    let _ = fs::remove_dir_all(&backup_dir);
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1006,4 +965,238 @@ fn file_stem(path: &Path) -> String {
     path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+// ---------------------------------------------------------------------------
+// New versioned file processing functions
+// ---------------------------------------------------------------------------
+
+/// Prepare source images for incremental OTA by creating symlinks/copies
+/// from versioned files (e.g., system.0.img -> system.img)
+fn prepare_source_images(workdir: &Path, prev_version: usize) -> Result<()> {
+    // Find all versioned .img files with the previous version suffix
+    for entry in fs::read_dir(workdir).context("read workdir")? {
+        let entry = entry.context("read dir entry")?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        
+        let filename = entry.file_name().to_string_lossy().into_owned();
+        let expected_suffix = format!(".{}.img", prev_version);
+        
+        if filename.ends_with(&expected_suffix) {
+            // Extract partition name (e.g., "system.0.img" -> "system")
+            let partition = &filename[..filename.len() - expected_suffix.len()];
+            let target = workdir.join(format!("{}.img", partition));
+            
+            // Remove existing target if any
+            if target.exists() {
+                fs::remove_file(&target)?;
+            }
+            
+            // Create hard link or copy (Windows may not support symlinks without admin)
+            #[cfg(windows)]
+            {
+                fs::copy(&path, &target)
+                    .with_context(|| format!("copy {} -> {}", path.display(), target.display()))?;
+            }
+            #[cfg(not(windows))]
+            {
+                std::os::unix::fs::symlink(&path, &target)
+                    .or_else(|_| fs::copy(&path, &target))
+                    .with_context(|| format!("link/copy {} -> {}", path.display(), target.display()))?;
+            }
+            
+            log::info!("prepared source: {} -> {}", path.display(), target.display());
+        }
+    }
+    
+    Ok(())
+}
+
+/// Process all partitions with version tracking and per-partition error handling
+/// Returns: (success_count, fail_count, failed_partitions)
+fn process_partitions_with_version(
+    workdir: &Path,
+    target_version: usize,
+    config: &BatchConfig,
+) -> Result<(usize, usize, Vec<String>)> {
+    let script_path = find_updater_script(workdir)?;
+    let script_content = fs::read_to_string(&script_path)
+        .with_context(|| format!("read {}", script_path.display()))?;
+    
+    let registry = builtin_registry();
+    
+    // Run the edify script - this will process all partitions
+    let result = run_script_with_mode(
+        &script_content,
+        &registry,
+        &workdir.to_string_lossy(),
+        config.verify,
+        true, // Always offline mode
+    );
+    
+    match result {
+        Ok(_) => {
+            // Script executed successfully - now rename output files to versioned names
+            let (promoted, failed) = promote_files_to_version(workdir, target_version)?;
+            
+            // Clean up non-versioned files and transfer lists
+            cleanup_after_processing(workdir)?;
+            
+            Ok((promoted.len(), failed.len(), failed))
+        }
+        Err(e) => {
+            // Script failed - rollback any partial changes
+            log::error!("edify script failed: {}", e);
+            rollback_versioned_files(workdir, target_version)?;
+            
+            // Try to identify which partitions might have failed
+            let failed = vec!["unknown".to_string()]; // Generic failure
+            Ok((0, 1, failed))
+        }
+    }
+}
+
+/// Promote processed output files to versioned names
+/// Returns: (promoted_partitions, failed_partitions)
+fn promote_files_to_version(workdir: &Path, version: usize) -> Result<(Vec<String>, Vec<String>)> {
+    let mut promoted = Vec::new();
+    let mut failed = Vec::new();
+    
+    // Find all non-versioned .img files and rename them to versioned names
+    for entry in fs::read_dir(workdir).context("read workdir")? {
+        let entry = entry.context("read dir entry")?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        
+        let filename = entry.file_name().to_string_lossy().into_owned();
+        
+        // Skip already versioned files and non-.img files
+        if !filename.ends_with(".img") || filename.matches('.').count() > 1 {
+            continue;
+        }
+        
+        // Extract partition name (e.g., "system.img" -> "system")
+        let partition = &filename[..filename.len() - 4];
+        let versioned_name = format!("{}.{}.img", partition, version);
+        let versioned_path = workdir.join(&versioned_name);
+        
+        // Remove old version if exists
+        if versioned_path.exists() {
+            if let Err(e) = fs::remove_file(&versioned_path) {
+                log::warn!("failed to remove old version {}: {}", versioned_path.display(), e);
+                failed.push(partition.to_string());
+                continue;
+            }
+        }
+        
+        // Rename to versioned name
+        if let Err(e) = fs::rename(&path, &versioned_path) {
+            log::error!("failed to rename {} to {}: {}", path.display(), versioned_path.display(), e);
+            failed.push(partition.to_string());
+        } else {
+            log::info!("promoted: {} -> {}", path.display(), versioned_path.display());
+            promoted.push(partition.to_string());
+        }
+    }
+    
+    Ok((promoted, failed))
+}
+
+/// Clean up temporary files after processing
+fn cleanup_after_processing(workdir: &Path) -> Result<()> {
+    // Remove transfer lists, patch files, etc.
+    let patterns_to_remove = [
+        "*.transfer.list",
+        "*.patch.dat",
+        "*.new.dat",
+        "*.new.dat.br",
+        "*.new.dat.lzma",
+        "update-script",
+        "dynamic_partitions_op_list",
+        "*.img", // Non-versioned .img files (source links)
+    ];
+    
+    for entry in fs::read_dir(workdir).context("read workdir")? {
+        let entry = entry.context("read dir entry")?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        
+        let filename = entry.file_name().to_string_lossy().into_owned();
+        
+        // Check if file matches any removal pattern
+        let should_remove = patterns_to_remove.iter().any(|pattern| {
+            if pattern.starts_with("*.") {
+                let ext = &pattern[1..]; // Remove leading *
+                filename.ends_with(ext)
+            } else {
+                filename == *pattern
+            }
+        });
+        
+        // But keep versioned .img files
+        let is_versioned_img = filename.ends_with(".img") && 
+            filename.matches('.').count() >= 2 &&
+            filename.rsplit('.').nth(1).and_then(|s| s.parse::<usize>().ok()).is_some();
+        
+        if should_remove && !is_versioned_img {
+            if let Err(e) = fs::remove_file(&path) {
+                log::warn!("cleanup: failed to remove {}: {}", path.display(), e);
+            } else {
+                log::debug!("cleanup: removed {}", path.display());
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+/// Clean up workdir, keeping only versioned .img files and essential metadata
+fn cleanup_versioned_workdir(workdir: &Path, current_version: usize) -> Result<()> {
+    // Keep files with version <= current_version
+    for entry in fs::read_dir(workdir).context("read workdir")? {
+        let entry = entry.context("read dir entry")?;
+        let path = entry.path();
+        
+        if path.is_dir() {
+            // Remove subdirectories (META-INF, etc.)
+            let _ = fs::remove_dir_all(&path);
+            continue;
+        }
+        
+        let filename = entry.file_name().to_string_lossy().into_owned();
+        
+        // Check if it's a versioned .img file
+        if filename.ends_with(".img") {
+            // Extract version number
+            let stem = path.file_stem().unwrap().to_string_lossy();
+            let parts: Vec<&str> = stem.rsplitn(2, '.').collect();
+            
+            if parts.len() == 2 {
+                if let Ok(version) = parts[0].parse::<usize>() {
+                    if version <= current_version {
+                        // Keep this version
+                        continue;
+                    }
+                }
+            }
+        }
+        
+        // Also keep error.log if exists
+        if filename == "error.log" {
+            continue;
+        }
+        
+        // Remove everything else
+        let _ = fs::remove_file(&path);
+    }
+    
+    log::info!("workdir cleaned, kept versioned .img files up to .{}", current_version);
+    Ok(())
 }
