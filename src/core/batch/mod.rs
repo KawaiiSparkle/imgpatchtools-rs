@@ -368,13 +368,8 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
 
         // Update version tracking
         println!("  {} partitions processed successfully.", success_count);
-        
-        // Clean up temporary files and old versions
-        timer.start(format!("OTA #{} - Cleanup", pkg.index));
-        cleanup_versioned_workdir(workdir, current_version)?;
-        timer.end();
 
-        // Track dynamic partitions
+        // Track dynamic partitions BEFORE cleanup (cleanup removes the op_list file!)
         let script_path = workdir.join("META-INF/com/google/android/updater-script");
         if script_path.exists() {
             let script_content = fs::read_to_string(&script_path).unwrap_or_default();
@@ -385,11 +380,17 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
                     if let Ok(content) = fs::read_to_string(&op_list_path) {
                         if let Ok(dp) = crate::core::super_img::op_list::parse_op_list(&content) {
                             last_dp = Some(dp);
+                            log::info!("dynamic partitions detected and saved for super.img build");
                         }
                     }
                 }
             }
         }
+        
+        // Clean up temporary files and old versions
+        timer.start(format!("OTA #{} - Cleanup", pkg.index));
+        cleanup_versioned_workdir(workdir, current_version)?;
+        timer.end();
 
         current_version += 1;
         println!("  OTA #{} completed. Current version: .{}", pkg.index, current_version - 1);
