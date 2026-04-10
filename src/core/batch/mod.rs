@@ -1004,7 +1004,9 @@ fn prepare_source_images(workdir: &Path, prev_version: usize) -> Result<()> {
             #[cfg(not(windows))]
             {
                 std::os::unix::fs::symlink(&path, &target)
-                    .or_else(|_| fs::copy(&path, &target))
+                    .or_else(|_| {
+                        fs::copy(&path, &target).map(|_| ())
+                    })
                     .with_context(|| format!("link/copy {} -> {}", path.display(), target.display()))?;
             }
             

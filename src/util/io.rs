@@ -569,6 +569,7 @@ impl BlockFile {
     /// On Windows, attempts to use `FSCTL_SET_SPARSE` + `FSCTL_SET_ZERO_DATA`
     /// for each range, which de-allocates disk blocks instead of writing zeroes.
     /// Falls back to write-zero if the sparse API is unavailable.
+    #[allow(unreachable_code)] // Platform-specific cfg blocks cause false positives
     pub fn zero_ranges_with_progress<F>(
         &mut self,
         ranges: &RangeSet,
@@ -626,12 +627,14 @@ impl BlockFile {
                     }
                 }
             }
-            Ok(())
+            return Ok(());
         }
 
-        // Non-Windows: Try mmap zero for large contiguous ranges
+        // Code below is only compiled on non-Windows platforms.
+        // On Windows, the function returns in the block above.
         #[cfg(not(target_os = "windows"))]
         {
+            // Try mmap zero for large contiguous ranges
             let total_zero_bytes: usize = ranges
                 .iter()
                 .map(|(s, e)| ((e - s) as usize) * self.block_size)
@@ -662,10 +665,12 @@ impl BlockFile {
             return Ok(());
         }
 
-        // This line is only reached on Windows when the Windows block above is active,
-        // but we already returned inside that block. This is a compile-time conditional.
-        #[cfg(not(target_os = "windows"))]
-        return Ok(());
+        #[cfg(target_os = "windows")]
+        {
+            // This is unreachable on Windows because the function returns above,
+            // but we need it for type checking on all platforms.
+            unreachable!()
+        }
     }
 
     /// Mmap-based zero fill for large ranges (much faster than write-zero).
