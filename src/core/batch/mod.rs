@@ -460,7 +460,7 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Extract only necessary files from OTA zip to workdir.
-/// Extracts: boot*, *.dat, *.dat.br, *.dat.lzma, *.transfer.list, update-script, dynamic_partitions_op_list
+/// Extracts: boot*, *.dat, *.dat.br, *.dat.lzma, *.transfer.list, updater-script, dynamic_partitions_op_list
 fn extract_ota_zip(zip_path: &Path, workdir: &Path) -> Result<()> {
     // Ensure workdir exists
     fs::create_dir_all(workdir)
@@ -476,7 +476,7 @@ fn extract_ota_zip(zip_path: &Path, workdir: &Path) -> Result<()> {
         .arg("*.dat.br")
         .arg("*.dat.lzma")
         .arg("*.transfer.list")
-        .arg("update-script")
+        .arg("META-INF/com/google/android/updater-script")
         .arg("dynamic_partitions_op_list")
         .arg(format!("-o{}", workdir.display()))
         .arg("-y")
@@ -543,7 +543,7 @@ fn rollback_versioned_files(workdir: &Path, version: usize) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Clean up workdir after edify execution.
-/// Keeps only: *.*.dat.*, *.transfer.list, *.img, boot.img.p, boot.img, update-script
+/// Keeps only: *.*.dat.*, *.transfer.list, *.img, boot.img.p, boot.img, updater-script
 /// Note: *.img files are kept for incremental OTA chaining (will be moved to next OTA)
 #[allow(dead_code)]
 fn cleanup_workdir(ota_dir: &Path) -> Result<()> {
@@ -553,7 +553,7 @@ fn cleanup_workdir(ota_dir: &Path) -> Result<()> {
     // - dynamic_partitions_op_list
     // - boot.img.p
     // - boot.img
-    // - update-script
+    // - updater-script
 
     fn is_allowed_file(filename: &str) -> bool {
         // Check for *.*.dat.* pattern (e.g., system.new.dat.br)
@@ -573,7 +573,7 @@ fn cleanup_workdir(ota_dir: &Path) -> Result<()> {
             return true;
         }
         // Check for specific files
-        if filename == "boot.img.p" || filename == "boot.img" || filename == "update-script" {
+        if filename == "boot.img.p" || filename == "boot.img" || filename == "updater-script" {
             return true;
         }
         false
@@ -1118,7 +1118,7 @@ fn cleanup_after_processing(workdir: &Path) -> Result<()> {
         "*.new.dat",
         "*.new.dat.br",
         "*.new.dat.lzma",
-        "update-script",
+        "updater-script",
         "dynamic_partitions_op_list",
         "*.img", // Non-versioned .img files (source links)
     ];
