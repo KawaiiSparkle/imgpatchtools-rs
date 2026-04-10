@@ -668,13 +668,6 @@ impl BlockFile {
             }
             return Ok(());
         }
-
-        #[cfg(target_os = "windows")]
-        {
-            // This is unreachable on Windows because the function returns above,
-            // but we need it for type checking on all platforms.
-            unreachable!()
-        }
     }
 
     /// Mmap-based zero fill for large ranges (much faster than write-zero).
