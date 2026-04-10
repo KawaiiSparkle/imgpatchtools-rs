@@ -321,6 +321,7 @@ impl BlockFile {
     }
 
     /// Sequentially stream data from a reader into non-contiguous target block ranges.
+    #[allow(unused_mut)] // mut needed on some platforms but lint may vary
     pub fn write_ranges_from_reader<F>(
         &mut self,
         ranges: &RangeSet,
@@ -365,6 +366,7 @@ impl BlockFile {
 
     /// Write ranges using a custom read callback (for parallel readers).
     /// The callback should fill the provided buffer and return Ok(()) on success.
+    #[allow(unused_mut)] // mut needed on some platforms but lint may vary
     pub fn write_ranges_with_callback<F, R>(
         &mut self,
         ranges: &RangeSet,
@@ -420,6 +422,7 @@ impl BlockFile {
     /// Mmap-optimized version of write_ranges_with_callback for large writes.
     ///
     /// CRITICAL: Uses synchronous flush to ensure Bit-Exact consistency.
+    #[allow(unused_mut)] // mut needed on some platforms but lint may vary
     fn write_ranges_with_callback_mmap<F, R>(
         &mut self,
         ranges: &RangeSet,
@@ -570,6 +573,7 @@ impl BlockFile {
     /// for each range, which de-allocates disk blocks instead of writing zeroes.
     /// Falls back to write-zero if the sparse API is unavailable.
     #[allow(unreachable_code)] // Platform-specific cfg blocks cause false positives
+    #[allow(unused_mut)] // mut needed on some platforms but lint may vary
     pub fn zero_ranges_with_progress<F>(
         &mut self,
         ranges: &RangeSet,
@@ -677,6 +681,7 @@ impl BlockFile {
     ///
     /// CRITICAL: Uses synchronous flush to ensure Bit-Exact consistency.
     #[cfg(not(target_os = "windows"))]
+    #[allow(unused_mut)] // mut needed on some platforms but lint may vary
     fn zero_ranges_mmap<F>(&mut self, ranges: &RangeSet, mut progress_cb: F) -> Result<()>
     where
         F: FnMut(u64),
