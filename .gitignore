@@ -3,3 +3,4 @@
 /batch_work
 /test
 *.lock
+Cargo.lock
