@@ -401,11 +401,8 @@ fn fn_unmap_partition(_ctx: &mut FunctionContext, _args: &[Value]) -> Result<Val
 
 fn fn_update_dynamic_partitions(ctx: &mut FunctionContext, args: &[Value]) -> Result<Value> {
     let path_str = args.first().map_or("", |a| a.as_str());
-    let path = if Path::new(path_str).exists() {
-        PathBuf::from(path_str)
-    } else {
-        ctx.resolve_package_path(path_str)
-    };
+    // First resolve to workdir-relative path, then check existence
+    let path = ctx.resolve_package_path(path_str);
     if !path.exists() {
         log::warn!(
             "update_dynamic_partitions: {} not found, skip",
