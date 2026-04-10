@@ -62,6 +62,10 @@ impl FunctionContext {
         }
 
         let pn = Self::extract_partition_name(device_path);
+        // If partition name is empty, don't try to resolve to a file
+        if pn.is_empty() {
+            return None;
+        }
         let img = Path::new(&self.workdir).join(format!("{pn}.img"));
         if img.exists() {
             return Some(img);
@@ -78,13 +82,24 @@ impl FunctionContext {
             return p;
         }
         let pn = Self::extract_partition_name(device_path);
+        // If partition name is empty, this is an error case - return the original path
+        // so the caller can handle it appropriately
+        if pn.is_empty() {
+            return Path::new(device_path).to_path_buf();
+        }
         Path::new(&self.workdir).join(format!("{pn}.img"))
     }
 
     pub fn extract_partition_name(device_path: &str) -> &str {
         let p = device_path.strip_prefix("EMMC:").unwrap_or(device_path);
         let n = if let Some(i) = p.rfind("/by-name/") {
-            &p[i + 9..]
+            let after = &p[i + 9..];
+            // Handle case where path ends with "/by-name/" (no partition name)
+            if after.is_empty() || after == "/" {
+                // Try to extract from parent directory name or return empty
+                return "";
+            }
+            after.trim_end_matches('/')
         } else if let Some(i) = p.rfind('/') {
             &p[i + 1..]
         } else {
@@ -544,9 +559,29 @@ fn fn_block_image_update(ctx: &mut FunctionContext, args: &[Value]) -> Result<Va
         bail!("block_image_update: need 4 args");
     }
 
-    let part_name = FunctionContext::extract_partition_name(args[0].as_str());
-    let tgt = ctx.resolve_or_create_image_path(args[0].as_str());
+    let mut part_name = FunctionContext::extract_partition_name(args[0].as_str()).to_string();
     let tl = ctx.resolve_package_path(args[1].as_str());
+    
+    // If partition name is empty, try to infer from transfer_list filename
+    // e.g., "system.transfer.list" -> "system"
+    if part_name.is_empty() {
+        if let Some(stem) = tl.file_stem() {
+            let stem_str = stem.to_string_lossy();
+            if stem_str.ends_with(".transfer") {
+                part_name = stem_str.trim_end_matches(".transfer").to_string();
+            } else {
+                part_name = stem_str.to_string();
+            }
+        }
+    }
+    
+    // Create target path: workdir/{partition_name}.img
+    let tgt = if part_name.is_empty() {
+        ctx.resolve_or_create_image_path(args[0].as_str())
+    } else {
+        Path::new(&ctx.workdir).join(format!("{}.img", part_name))
+    };
+    
     let nd = ctx.resolve_package_path(args[2].as_str());
     let pd = ctx.resolve_package_path(args[3].as_str());
 
@@ -571,9 +606,19 @@ fn cleanup_blockimg_files(tl: &Path, nd: &Path, pd: &Path) {
     for path in &[tl, pd] {
         remove_if_exists(path);
     }
+    // nd could be either .new.dat or .new.dat.br
+    // Remove the actual file that was used
     remove_if_exists(nd);
-    let br_path = PathBuf::from(format!("{}.br", nd.display()));
-    remove_if_exists(&br_path);
+    // Also try to remove the alternative format if it exists
+    let nd_str = nd.to_string_lossy();
+    let alt_path = if nd_str.ends_with(".br") {
+        // If nd is .new.dat.br, also try removing .new.dat (shouldn't exist but be safe)
+        PathBuf::from(&nd_str[..nd_str.len() - 3])
+    } else {
+        // If nd is .new.dat, also try removing .new.dat.br
+        PathBuf::from(format!("{}.br", nd_str))
+    };
+    remove_if_exists(&alt_path);
 }
 
 fn remove_if_exists(path: &Path) {

@@ -185,7 +185,11 @@ pub fn run(args: &BlockimgArgs, verbose: bool) -> Result<()> {
                 &stash_dir,
                 verbose,
                 resume_file.as_deref(),
-            )
+            )?;
+            
+            // Cleanup: remove processed files after successful update
+            cleanup_blockimg_files(&transfer_list, &new_data, &patch_data);
+            Ok(())
         }
 
         BlockimgCommand::Verify {
@@ -253,6 +257,43 @@ pub fn run(args: &BlockimgArgs, verbose: bool) -> Result<()> {
             }
 
             Ok(())
+        }
+    }
+}
+
+/// Cleanup blockimg processing files after successful update.
+/// Removes transfer_list, new_data (and its .br/.lzma variants), and patch_data files.
+fn cleanup_blockimg_files(tl: &Path, nd: &Path, pd: &Path) {
+    // Remove transfer list and patch data
+    for path in &[tl, pd] {
+        remove_if_exists(path);
+    }
+    // Remove new data file
+    remove_if_exists(nd);
+    // Also try to remove alternative compression formats
+    let nd_str = nd.to_string_lossy();
+    if nd_str.ends_with(".br") {
+        // If .new.dat.br was used, also try removing .new.dat.lzma and .new.dat
+        let base = &nd_str[..nd_str.len() - 3];
+        remove_if_exists(&PathBuf::from(format!("{}.lzma", base)));
+        remove_if_exists(&PathBuf::from(base));
+    } else if nd_str.ends_with(".lzma") {
+        // If .new.dat.lzma was used, also try removing .new.dat.br and .new.dat
+        let base = &nd_str[..nd_str.len() - 5];
+        remove_if_exists(&PathBuf::from(format!("{}.br", base)));
+        remove_if_exists(&PathBuf::from(base));
+    } else {
+        // If .new.dat was used, also try removing .new.dat.br and .new.dat.lzma
+        remove_if_exists(&PathBuf::from(format!("{}.br", nd_str)));
+        remove_if_exists(&PathBuf::from(format!("{}.lzma", nd_str)));
+    }
+}
+
+fn remove_if_exists(path: &Path) {
+    if path.exists() {
+        match std::fs::remove_file(path) {
+            Ok(()) => log::info!("cleanup: removed {}", path.display()),
+            Err(e) => log::warn!("cleanup: failed to remove {}: {}", path.display(), e),
         }
     }
 }
