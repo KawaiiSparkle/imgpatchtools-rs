@@ -1,6 +1,6 @@
 [package]
 name = "imgpatchtools-rs"
-version = "20260411.0.1"
+version = "20260411.0.3"
 edition = "2024"
 authors = ["KawaiiSparkle"]
 description = "Rust reimplementation of Android imgpatchtools"
