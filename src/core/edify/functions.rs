@@ -1103,23 +1103,27 @@ fn eval(expr: &Expr, ctx: &mut FunctionContext, reg: &FunctionRegistry) -> Resul
             if name == "assert" {
                 return eval_assert(args, ctx, reg);
             }
-            // Skip mode: allow ui_print, block_image_update, and package_extract_file
+            // Skip mode: allow ui_print, block_image_update, package_extract_file, and update_dynamic_partitions
             // (package_extract_file is needed by block_image_update to resolve paths)
+            // (update_dynamic_partitions is needed to detect dynamic partitions for super.img building)
             if ctx.skip_mode
                 && name != "ui_print"
                 && name != "block_image_update"
                 && name != "package_extract_file"
+                && name != "update_dynamic_partitions"
             {
                 log::debug!("edify: skip_mode skipping function '{}'", name);
                 return Ok(Value::String(String::new()));
             }
-            // Fast mode: only execute apply_patch, block_image_update, abort and package_extract_file
+            // Fast mode: only execute apply_patch, block_image_update, abort, package_extract_file, and update_dynamic_partitions
             // (package_extract_file is needed by block_image_update to resolve file paths)
+            // (update_dynamic_partitions is needed to detect dynamic partitions for super.img building)
             if ctx.fast_mode
                 && name != "apply_patch"
                 && name != "block_image_update"
                 && name != "abort"
                 && name != "package_extract_file"
+                && name != "update_dynamic_partitions"
             {
                 log::debug!("edify: fast_mode skipping function '{}'", name);
                 return Ok(Value::String(String::new()));
