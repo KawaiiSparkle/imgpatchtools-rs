@@ -39,14 +39,31 @@ pub fn block_image_update(
     })?;
     let tl = parse_transfer_list(&tl_content).context("failed to parse transfer list")?;
 
-    log_header_info(&tl);
+    // For V4 transfer lists, the header's total_blocks may represent changed blocks
+    // rather than the actual partition size. Calculate the actual total from commands.
+    let actual_total_blocks = calculate_actual_total_blocks(&tl);
+    let header_total_blocks = tl.total_blocks();
+    
+    // Use the larger of the two values to ensure the target is large enough
+    let effective_total_blocks = actual_total_blocks.max(header_total_blocks);
+    
+    if tl.version() >= 4 && actual_total_blocks != header_total_blocks {
+        log::info!(
+            "V4 transfer list: header reports {} blocks, actual max is {} blocks, using {}",
+            header_total_blocks,
+            actual_total_blocks,
+            effective_total_blocks
+        );
+    }
+    
+    log_header_info(&tl, effective_total_blocks);
 
-    let mut target = open_or_create_target(target_path, &tl)?;
+    let mut target = open_or_create_target(target_path, effective_total_blocks, &tl)?;
 
     let source = open_source(source_path)?;
 
     if let Some(ref src) = source {
-        initialise_target_from_source(src, &mut target, &tl)?;
+        initialise_target_from_source(src, &mut target, effective_total_blocks)?;
     }
 
     let new_data = ParallelNewDataReader::open(new_data_path)
@@ -134,9 +151,47 @@ pub fn range_sha1(file_path: &Path, ranges_str: &str, block_size: usize) -> Resu
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-fn log_header_info(tl: &TransferList) {
+/// Calculate actual total blocks from transfer list commands.
+/// For V4 transfer lists, the header's total_blocks may represent changed blocks
+/// rather than the actual partition size. This function computes the true total
+/// by finding the maximum block number referenced in any command.
+fn calculate_actual_total_blocks(tl: &TransferList) -> u64 {
+    let mut max_block: u64 = 0;
+
+    for cmd in &tl.commands {
+        // Check target ranges
+        if let Some(ref ranges) = cmd.target_ranges {
+            for (_, end) in ranges.iter() {
+                if end > max_block {
+                    max_block = end;
+                }
+            }
+        }
+        // Check source ranges
+        if let Some(ref ranges) = cmd.src_ranges {
+            for (_, end) in ranges.iter() {
+                if end > max_block {
+                    max_block = end;
+                }
+            }
+        }
+        // Check hash tree ranges
+        if let Some(ref ranges) = cmd.hash_tree_ranges {
+            for (_, end) in ranges.iter() {
+                if end > max_block {
+                    max_block = end;
+                }
+            }
+        }
+    }
+
+    max_block
+}
+
+fn log_header_info(tl: &TransferList, effective_total_blocks: u64) {
     log::info!("transfer list version: {}", tl.version());
-    log::info!("total blocks: {}", tl.total_blocks());
+    log::info!("header total blocks: {}", tl.total_blocks());
+    log::info!("effective total blocks: {}", effective_total_blocks);
     log::info!("commands: {}", tl.len());
     if tl.version() >= 2 {
         log::info!(
@@ -150,11 +205,10 @@ fn log_header_info(tl: &TransferList) {
 fn initialise_target_from_source(
     src: &BlockFile,
     target: &mut BlockFile,
-    tl: &TransferList,
+    total_blocks: u64,
 ) -> Result<()> {
     let src_blocks = src.total_blocks();
-    let tgt_blocks = tl.total_blocks();
-    let copy_blocks = src_blocks.min(tgt_blocks);
+    let copy_blocks = src_blocks.min(total_blocks);
 
     if copy_blocks == 0 {
         return Ok(());
@@ -177,8 +231,8 @@ fn initialise_target_from_source(
     Ok(())
 }
 
-fn open_or_create_target(path: &Path, tl: &TransferList) -> Result<BlockFile> {
-    let expected_len = tl.total_blocks() * BLOCK_SIZE as u64;
+fn open_or_create_target(path: &Path, total_blocks: u64, _tl: &TransferList) -> Result<BlockFile> {
+    let expected_len = total_blocks * BLOCK_SIZE as u64;
 
     if path.exists() {
         let meta = fs::metadata(path)
@@ -190,9 +244,24 @@ fn open_or_create_target(path: &Path, tl: &TransferList) -> Result<BlockFile> {
                 path.display(),
                 meta.len()
             );
-        } else {
+        } else if meta.len() < expected_len {
+            // File is too small - extend it
             log::info!(
-                "opening existing target with size mismatch ({} vs expected {}), continuing...",
+                "extending existing target from {} to {} bytes",
+                meta.len(),
+                expected_len
+            );
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .with_context(|| format!("failed to open target for resize {}", path.display()))?;
+            file.set_len(expected_len)
+                .with_context(|| format!("failed to resize target to {}", expected_len))?;
+        } else {
+            // File is larger than expected - keep it as is
+            log::info!(
+                "opening existing target: {} ({} bytes, larger than expected {})",
+                path.display(),
                 meta.len(),
                 expected_len
             );
@@ -204,7 +273,7 @@ fn open_or_create_target(path: &Path, tl: &TransferList) -> Result<BlockFile> {
     log::info!(
         "creating target: {} ({} blocks, {} bytes)",
         path.display(),
-        tl.total_blocks(),
+        total_blocks,
         expected_len,
     );
 
@@ -214,7 +283,7 @@ fn open_or_create_target(path: &Path, tl: &TransferList) -> Result<BlockFile> {
                 .with_context(|| format!("failed to create parent dir {}", parent.display()))?;
         }
 
-    BlockFile::create(path, tl.total_blocks(), BLOCK_SIZE)
+    BlockFile::create(path, total_blocks, BLOCK_SIZE)
         .with_context(|| format!("failed to create target {}", path.display()))
 }
 

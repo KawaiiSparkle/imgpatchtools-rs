@@ -296,7 +296,6 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
     println!("  Threads:     {}", config.threads);
     println!();
 
-    let mut last_dp: Option<DynamicPartitionState> = None;
     let mut current_version: usize = 0; // 0 = full OTA, 1+ = incremental
 
     for pkg in packages {
@@ -369,33 +368,11 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
         // Update version tracking
         println!("  {} partitions processed successfully.", success_count);
 
-        // Track dynamic partitions BEFORE cleanup (must be before cleanup_after_processing!)
-        if let Ok(script_path) = find_updater_script(workdir) {
-            let script_content = fs::read_to_string(&script_path).unwrap_or_default();
-            if script_content.contains("update_dynamic_partitions") {
-                let op_list_path = workdir.join("dynamic_partitions_op_list");
-                if op_list_path.exists() {
-                    if let Ok(content) = fs::read_to_string(&op_list_path) {
-                        if let Ok(dp) = crate::core::super_img::op_list::parse_op_list(&content) {
-                            last_dp = Some(merge_dynamic_partitions(last_dp, dp));
-                            println!("  Dynamic partitions detected — layout cached for super.img build.");
-                        }
-                    }
-                } else {
-                    println!("  WARNING: updater-script references dynamic partitions but op_list not found.");
-                }
-            }
-        }
-        
-        // Clean up temporary files (transfer lists, patch files, etc.)
-        // This is done AFTER dynamic partition detection to ensure op_list is available
-        timer.start(format!("OTA #{} - Cleanup temp files", pkg.index));
-        cleanup_after_processing(workdir)?;
-        timer.end();
-        
-        // Clean up old versioned files
-        timer.start(format!("OTA #{} - Cleanup old versions", pkg.index));
-        cleanup_versioned_workdir(workdir, current_version)?;
+        // Clean up workdir - remove subdirectories (META-INF) and non-essential files
+        // Note: edify execution already cleans up .transfer.list, .patch.dat, .new.dat files
+        // via block_image_update and apply_patch functions
+        timer.start(format!("OTA #{} - Cleanup workdir", pkg.index));
+        cleanup_workdir(workdir, current_version)?;
         timer.end();
 
         current_version += 1;
@@ -408,23 +385,25 @@ fn execute_batch(packages: &[OtaPackage], config: &BatchConfig) -> Result<()> {
     fs::create_dir_all(final_output)
         .with_context(|| format!("create output dir {}", final_output.display()))?;
 
-    // Build super.img if dynamic partitions were detected
+    // Build super.img if not disabled
+    // Note: This requires dynamic_partitions_op_list to exist in workdir
     if !config.no_super {
-        if let Some(ref dp) = last_dp {
-            println!();
-            println!("  Dynamic partitions detected — building super.img...");
-            timer.start("Build super.img");
-
-            // Create symlinks for partition images so super builder can find them
-            let linked = link_partition_images_for_super(workdir, current_version - 1)?;
-            println!("  Linked {} partition images for super build", linked.len());
-
-            build_super_from_batch(dp, workdir, final_output, config)?;
-            timer.end();
-        } else {
-            println!();
-            println!("  No dynamic partitions detected — skipping super.img build.");
+        println!();
+        timer.start("Build super.img");
+        
+        match build_super_from_batch_with_check(workdir, final_output, config) {
+            Ok(()) => {
+                timer.end();
+            }
+            Err(e) => {
+                timer.end();
+                println!("  ERROR: Failed to build super.img: {}", e);
+                bail!("super.img build failed: {}", e);
+            }
         }
+    } else {
+        println!();
+        println!("  Skipping super.img build (--no-super specified).");
     }
 
     println!("══════════════════════════════════════════════════════");
@@ -547,99 +526,6 @@ fn rollback_versioned_files(workdir: &Path, version: usize) -> Result<()> {
         }
     }
     
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Workdir cleanup - keep only essential files
-// ---------------------------------------------------------------------------
-
-/// Clean up workdir after edify execution.
-/// Keeps only: *.*.dat.*, *.transfer.list, *.img, boot.img.p, boot.img, updater-script
-/// Note: *.img files are kept for incremental OTA chaining (will be moved to next OTA)
-#[allow(dead_code)]
-fn cleanup_workdir(ota_dir: &Path) -> Result<()> {
-    // Allowed file patterns:
-    // - *.*.dat.* (system.new.dat.br, etc.)
-    // - *.transfer.list
-    // - dynamic_partitions_op_list
-    // - boot.img.p
-    // - boot.img
-    // - updater-script
-
-    fn is_allowed_file(filename: &str) -> bool {
-        // Check for *.*.dat.* pattern (e.g., system.new.dat.br)
-        if filename.contains(".dat.") {
-            return true;
-        }
-        // Check for *.transfer.list
-        if filename.ends_with(".transfer.list") {
-            return true;
-        }
-        // Check for dynamic_partitions_op_list (needed for super.img building)
-        if filename == "dynamic_partitions_op_list" {
-            return true;
-        }
-        // Check for *.img files (needed for incremental OTA chaining)
-        if filename.ends_with(".img") {
-            return true;
-        }
-        // Check for specific files
-        if filename == "boot.img.p" || filename == "boot.img" || filename == "updater-script" {
-            return true;
-        }
-        false
-    }
-
-    // Collect files to delete
-    let mut files_to_delete: Vec<PathBuf> = Vec::new();
-    let mut dirs_to_delete: Vec<PathBuf> = Vec::new();
-
-    for entry in fs::read_dir(ota_dir).context("read ota_dir for cleanup")? {
-        let entry = entry.context("read dir entry")?;
-        let path = entry.path();
-
-        if path.is_file() {
-            let filename = entry.file_name();
-            let filename_str = filename.to_string_lossy();
-
-            if !is_allowed_file(&filename_str) {
-                files_to_delete.push(path);
-            }
-        } else if path.is_dir() {
-            // Mark directories for deletion (except hidden backup dir)
-            let dirname = entry.file_name();
-            let dirname_str = dirname.to_string_lossy();
-
-            if dirname_str != ".batch_backup" {
-                dirs_to_delete.push(path);
-            }
-        }
-    }
-
-    // Delete files
-    for path in files_to_delete {
-        if let Err(e) = fs::remove_file(&path) {
-            log::warn!("cleanup: failed to delete file {}: {}", path.display(), e);
-        } else {
-            log::debug!("cleanup: deleted file {}", path.display());
-        }
-    }
-
-    // Delete directories recursively
-    for path in dirs_to_delete {
-        if let Err(e) = fs::remove_dir_all(&path) {
-            log::warn!(
-                "cleanup: failed to delete directory {}: {}",
-                path.display(),
-                e
-            );
-        } else {
-            log::debug!("cleanup: deleted directory {}", path.display());
-        }
-    }
-
-    log::info!("cleanup: workdir cleaned, only essential files retained");
     Ok(())
 }
 
@@ -969,6 +855,121 @@ fn serialize_dp_to_op_list(dp: &DynamicPartitionState) -> String {
     lines.join("\n")
 }
 
+/// Extract partition names from dynamic_partitions_op_list file by parsing resize commands.
+/// Lines like "resize partition_name 12345678" will extract "partition_name".
+fn extract_partition_names_from_op_list(content: &str) -> Vec<String> {
+    let mut partitions = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with("resize ") {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                partitions.push(parts[1].to_string());
+            }
+        }
+    }
+    partitions
+}
+
+/// Check if a partition name matches a pattern (supports * wildcard).
+/// Pattern "system*" will match "system", "system_ext", etc.
+fn partition_matches_pattern(partition: &str, pattern: &str) -> bool {
+    if pattern.ends_with('*') {
+        let prefix = &pattern[..pattern.len() - 1];
+        partition.starts_with(prefix)
+    } else {
+        partition == pattern
+    }
+}
+
+/// Filter DynamicPartitionState to only include partitions matching the given patterns.
+/// Patterns support * wildcard (e.g., "system*" matches "system", "system_ext").
+fn filter_partitions_by_patterns(dp: &DynamicPartitionState, patterns: &[String]) -> DynamicPartitionState {
+    let mut filtered = DynamicPartitionState::new();
+    
+    // Keep all groups (they might be needed)
+    filtered.groups = dp.groups.clone();
+    
+    // Filter partitions based on patterns
+    for p in &dp.partitions {
+        for pattern in patterns {
+            if partition_matches_pattern(&p.name, pattern) {
+                filtered.partitions.push(p.clone());
+                break;
+            }
+        }
+    }
+    
+    filtered
+}
+
+/// Build super.img from batch processing with mandatory op_list check.
+/// 
+/// This function:
+/// 1. Checks if dynamic_partitions_op_list exists in workdir (required)
+/// 2. Parses the op_list to extract partition names from resize commands
+/// 3. Filters the DynamicPartitionState to only include matching partitions
+/// 4. Builds super.img using the filtered partition list
+/// 
+/// If op_list is not found, returns an error.
+fn build_super_from_batch_with_check(
+    workdir: &Path,
+    output_dir: &Path,
+    config: &BatchConfig,
+) -> Result<()> {
+    // Check if dynamic_partitions_op_list exists
+    let op_list_path = workdir.join("dynamic_partitions_op_list");
+    if !op_list_path.exists() {
+        bail!(
+            "dynamic_partitions_op_list not found in workdir ({}). \
+             Super image cannot be built without partition layout information.",
+            workdir.display()
+        );
+    }
+    
+    // Read and parse op_list
+    let content = fs::read_to_string(&op_list_path)
+        .with_context(|| format!("read {}", op_list_path.display()))?;
+    
+    let dp = crate::core::super_img::op_list::parse_op_list(&content)
+        .with_context(|| format!("parse {}", op_list_path.display()))?;
+    
+    // Extract partition names from resize commands
+    let partition_patterns = extract_partition_names_from_op_list(&content);
+    if partition_patterns.is_empty() {
+        bail!(
+            "no partition names found in {} (no resize commands). \
+             Cannot determine which partitions to include in super.img.",
+            op_list_path.display()
+        );
+    }
+    
+    log::info!(
+        "Extracted partition patterns from op_list: {:?}",
+        partition_patterns
+    );
+    
+    // Filter partitions based on patterns
+    let filtered_dp = filter_partitions_by_patterns(&dp, &partition_patterns);
+    if filtered_dp.partitions.is_empty() {
+        bail!(
+            "no partitions match the patterns from op_list: {:?}",
+            partition_patterns
+        );
+    }
+    
+    log::info!(
+        "Filtered partitions for super.img: {:?}",
+        filtered_dp.partitions.iter().map(|p| &p.name).collect::<Vec<_>>()
+    );
+    
+    println!();
+    println!("  Building super.img with {} partitions...", filtered_dp.partitions.len());
+    
+    // Build super.img using filtered partitions
+    build_super_from_batch(&filtered_dp, workdir, output_dir, config)
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -981,6 +982,7 @@ fn file_stem(path: &Path) -> String {
 
 /// Merge two DynamicPartitionState, keeping the latest version of each partition/group.
 /// Used when processing multiple OTAs to accumulate the final partition layout.
+#[allow(dead_code)]
 fn merge_dynamic_partitions(
     existing: Option<DynamicPartitionState>,
     new: DynamicPartitionState,
@@ -1011,6 +1013,7 @@ fn merge_dynamic_partitions(
 
 /// Create symlinks/hardlinks for partition images to make them available for super build.
 /// Links {partition}.img.{version} -> {partition}.img for each partition.
+#[allow(dead_code)]
 fn link_partition_images_for_super(workdir: &Path, version: usize) -> Result<Vec<String>> {
     let mut linked = Vec::new();
 
@@ -1133,8 +1136,7 @@ fn process_partitions_with_version(
             // Script executed successfully - now rename output files to versioned names
             let (promoted, failed) = promote_files_to_version(workdir, target_version)?;
             
-            // Note: cleanup_after_processing is now called AFTER dynamic partition detection
-            // in the main execute_batch loop to ensure op_list is available for parsing.
+            // Note: cleanup is done in execute_batch loop after this function returns
             
             Ok((promoted.len(), failed.len(), failed))
         }
@@ -1200,57 +1202,20 @@ fn promote_files_to_version(workdir: &Path, version: usize) -> Result<(Vec<Strin
     Ok((promoted, failed))
 }
 
-/// Clean up temporary files after processing
-fn cleanup_after_processing(workdir: &Path) -> Result<()> {
-    // Remove transfer lists, patch files, etc.
-    let patterns_to_remove = [
-        "*.transfer.list",
-        "*.patch.dat",
-        "*.new.dat",
-        "*.new.dat.br",
-        "*.new.dat.lzma",
-        "updater-script",
-        "dynamic_partitions_op_list",
-        "*.img", // Non-versioned .img files (source links)
-    ];
-    
-    for entry in fs::read_dir(workdir).context("read workdir")? {
-        let entry = entry.context("read dir entry")?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        
-        let filename = entry.file_name().to_string_lossy().into_owned();
-        
-        // Check if file matches any removal pattern
-        let should_remove = patterns_to_remove.iter().any(|pattern| {
-            if pattern.starts_with("*.") {
-                let ext = &pattern[1..]; // Remove leading *
-                filename.ends_with(ext)
-            } else {
-                filename == *pattern
-            }
-        });
-        
-        // But keep versioned .img files (*.img.N)
-        let is_versioned_img = filename.contains(".img.") &&
-            filename.rsplitn(2, '.').next().and_then(|s| s.parse::<usize>().ok()).is_some();
-        
-        if should_remove && !is_versioned_img {
-            if let Err(e) = fs::remove_file(&path) {
-                log::warn!("cleanup: failed to remove {}: {}", path.display(), e);
-            } else {
-                log::debug!("cleanup: removed {}", path.display());
-            }
-        }
-    }
-    
-    Ok(())
-}
-
-/// Clean up workdir, keeping only versioned .img files and essential metadata
-fn cleanup_versioned_workdir(workdir: &Path, current_version: usize) -> Result<()> {
+/// Clean up workdir after OTA processing.
+/// 
+/// Keeps:
+/// - Versioned .img files (*.img.N where N <= current_version)
+/// - dynamic_partitions_op_list (needed for super.img build)
+/// - error.log (for debugging)
+/// 
+/// Removes:
+/// - All subdirectories (META-INF, etc.)
+/// - Other temporary files
+/// 
+/// Note: .transfer.list, .patch.dat, .new.dat files are already cleaned up
+/// by edify script execution (block_image_update and apply_patch).
+fn cleanup_workdir(workdir: &Path, current_version: usize) -> Result<()> {
     // Keep files with version <= current_version
     for entry in fs::read_dir(workdir).context("read workdir")? {
         let entry = entry.context("read dir entry")?;
@@ -1281,10 +1246,15 @@ fn cleanup_versioned_workdir(workdir: &Path, current_version: usize) -> Result<(
             continue;
         }
         
+        // Keep dynamic_partitions_op_list for super.img build
+        if filename == "dynamic_partitions_op_list" {
+            continue;
+        }
+        
         // Remove everything else
         let _ = fs::remove_file(&path);
     }
     
-    log::info!("workdir cleaned, kept versioned .img files up to .{}", current_version);
+    log::info!("workdir cleaned, kept versioned .img files up to .{} and dynamic_partitions_op_list", current_version);
     Ok(())
 }

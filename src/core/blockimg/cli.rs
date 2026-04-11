@@ -144,7 +144,7 @@ pub enum BlockimgCommand {
 }
 
 /// Execute the `blockimg` subcommand.
-pub fn run(args: &BlockimgArgs, verbose: bool) -> Result<()> {
+pub fn run(args: &BlockimgArgs, _verbose: bool) -> Result<()> {
     match &args.command {
         BlockimgCommand::Update {
             target,
@@ -183,7 +183,7 @@ pub fn run(args: &BlockimgArgs, verbose: bool) -> Result<()> {
                 &patch_data,
                 source.as_deref(),
                 &stash_dir,
-                verbose,
+                true, // Default to verbose mode for better user feedback
                 resume_file.as_deref(),
             )?;
             
