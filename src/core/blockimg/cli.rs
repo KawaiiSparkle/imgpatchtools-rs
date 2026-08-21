@@ -220,9 +220,7 @@ pub fn run(args: &BlockimgArgs, _verbose: bool) -> Result<()> {
                         "Reading ranges from update-script for partition: {}",
                         partition_name
                     );
-                    let info = crate::core::edify::parser::read_range_sha1_info_from_script(
-                        &partition_name,
-                    )?;
+                    let info = crate::core::ota::read_range_sha1_info_from_script(&partition_name)?;
                     (info.ranges, info.expected_sha1)
                 }
             };

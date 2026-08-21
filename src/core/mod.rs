@@ -4,10 +4,10 @@
 //! |----------------|------------------------|
 //! | [`applypatch`] | `applypatch/`          |
 //! | [`blockimg`]   | `blockimg.cpp`         |
-//! | [`edify`]      | Edify script engine    |
+//! | [`batch`]      | sequential OTA chain   |
+//! | [`ota`]        | OTA package reading    |
 
 pub mod applypatch;
 pub mod batch;
 pub mod blockimg;
-pub mod edify;
-pub mod super_img;
+pub mod ota;

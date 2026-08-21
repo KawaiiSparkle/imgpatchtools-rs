@@ -21,17 +21,13 @@ pub struct BatchArgs {
     #[arg(short, long, default_value = "./batch_work")]
     pub workdir: String,
 
-    /// Output directory for final partition images and super.img.
+    /// Output directory for final partition images.
     #[arg(short, long)]
     pub output: Option<String>,
 
     /// Cap a partition's updates at a specific OTA index (0-based).
     /// Format: "partition@index". The partition is included in OTAs 0..=index,
     /// then excluded from all subsequent OTAs. Repeatable.
-    ///
-    /// Examples:
-    ///   --cap boot@1    (boot updates only through the 1st incremental)
-    ///   --cap system@0  (system only in the full OTA, never in incrementals)
     #[arg(long, value_name = "PART@INDEX")]
     pub cap: Vec<String>,
 
@@ -44,10 +40,6 @@ pub struct BatchArgs {
     #[arg(short, long, default_value = "32")]
     pub threads: usize,
 
-    /// Skip automatic super.img building at the end.
-    #[arg(long)]
-    pub no_super: bool,
-
     /// List partitions referenced in each OTA package without executing.
     #[arg(long)]
     pub list: bool,
@@ -55,19 +47,6 @@ pub struct BatchArgs {
     /// Show execution plan without actually running anything.
     #[arg(long)]
     pub dry_run: bool,
-
-    /// Android version for LP metadata when building super.img (10, 11, 12+).
-    #[arg(long, default_value = "12")]
-    pub android_version: String,
-
-    /// Super.img output format: "sparse" or "raw".
-    #[arg(long, default_value = "sparse")]
-    pub format: String,
-
-    /// Verify mode: execute all commands including block_image_verify and assertions.
-    /// Without this flag, only apply_patch, block_image_update and abort are executed.
-    #[arg(long)]
-    pub verify: bool,
 }
 
 /// Execute the `batch` subcommand.
@@ -119,14 +98,10 @@ pub fn run(args: &BatchArgs) -> Result<()> {
         workdir: args.workdir.clone(),
         output_dir,
         threads,
-        no_super: args.no_super,
         dry_run: args.dry_run,
         list_only: args.list,
         caps,
         excludes,
-        android_version: args.android_version.clone(),
-        format: args.format.clone(),
-        verify: args.verify,
     };
 
     run_batch_internal(&args.full_ota, &args.inc_otas, &config)

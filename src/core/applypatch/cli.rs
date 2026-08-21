@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 
 use super::apply;
+use crate::core::ota::{self, ApplyPatchInfo};
 
 /// Arguments for the `applypatch` subcommand.
 #[derive(Args, Debug, Clone)]
@@ -40,33 +41,16 @@ pub struct ApplypatchArgs {
     /// Searches current directory or META-INF/com/google/android/ for update-script.
     #[arg(long)]
     pub from_script: bool,
+
+    /// Read parameters (and the patch file) from an OTA zip package instead of
+    /// the filesystem. The updater-script is located and parsed, and the patch
+    /// referenced by `apply_patch` is extracted from the zip — no external
+    /// unzip tool is required.
+    #[arg(long, value_name = "OTA_ZIP")]
+    pub ota: Option<PathBuf>,
 }
 
-/// Find update-script in current directory or META-INF/com/google/android/
-fn find_update_script() -> Result<PathBuf> {
-    let current_dir = std::env::current_dir()?;
-
-    // Try current directory first
-    let script_in_root = current_dir.join("update-script");
-    if script_in_root.exists() {
-        return Ok(script_in_root);
-    }
-
-    // Try META-INF/com/google/android/
-    let script_in_meta = current_dir
-        .join("META-INF")
-        .join("com")
-        .join("google")
-        .join("android")
-        .join("update-script");
-    if script_in_meta.exists() {
-        return Ok(script_in_meta);
-    }
-
-    anyhow::bail!("update-script not found in current directory or META-INF/com/google/android/")
-}
-
-/// Extract partition name from source path
+/// Extract partition name from source path.
 fn extract_partition_name(source: &Path) -> String {
     let name = source
         .file_stem()
@@ -85,140 +69,7 @@ fn extract_partition_name(source: &Path) -> String {
     }
 }
 
-/// ApplyPatchInfo holds parsed information from update-script
-#[derive(Debug, Clone)]
-struct ApplyPatchInfo {
-    source_spec: String,
-    target_sha1: String,
-    target_size: u64,
-    source_sha1: String,
-    patch_file: PathBuf,
-}
-
-/// Parse apply_patch calls from update-script for a given partition
-fn parse_apply_patch_from_script(partition_name: &str) -> Result<ApplyPatchInfo> {
-    let script_path = find_update_script()?;
-    let content = std::fs::read_to_string(&script_path)
-        .with_context(|| format!("Failed to read {}", script_path.display()))?;
-
-    // Search for apply_patch calls in the script
-    for line in content.lines() {
-        let line = line.trim();
-
-        // Skip comments and non-apply_patch lines
-        if line.starts_with('#') || !line.contains("apply_patch") {
-            continue;
-        }
-
-        // Check if this line contains the partition we're looking for
-        if !line.contains(partition_name) && !line.contains(&partition_name.replace("_", "/")) {
-            continue;
-        }
-
-        // Parse: apply_patch("source", "-", target_sha1, target_size, source_sha1, "patch/file.p")
-        if let Some(info) = try_parse_apply_patch_line(line) {
-            return Ok(info);
-        }
-    }
-
-    anyhow::bail!(
-        "apply_patch command not found for partition: {}",
-        partition_name
-    )
-}
-
-/// Try to parse an apply_patch line
-fn try_parse_apply_patch_line(line: &str) -> Option<ApplyPatchInfo> {
-    // Handle different formats:
-    // apply_patch("source", "-", "sha1", size, "sha1", "patch")
-    // apply_patch("source", "-", "sha1", size, "sha1:patch")
-
-    let content = if let Some(start) = line.find("apply_patch(") {
-        let args_start = start + "apply_patch(".len();
-        if let Some(end) = line[args_start..].rfind(')') {
-            &line[args_start..args_start + end]
-        } else {
-            return None;
-        }
-    } else {
-        return None;
-    };
-
-    // Split by comma, but handle quoted strings
-    let args = parse_args(content);
-    if args.len() < 5 {
-        return None;
-    }
-
-    let source_spec = args[0].clone();
-    let target_sha1 = args[2].clone();
-    let target_size: u64 = args[3].parse().ok()?;
-
-    // Handle sha1:patch format or separate args
-    let (source_sha1, patch_file) = if args.len() >= 6 {
-        (args[4].clone(), PathBuf::from(&args[5]))
-    } else if args[4].contains(':') {
-        let parts: Vec<&str> = args[4].splitn(2, ':').collect();
-        (parts[0].to_string(), PathBuf::from(parts[1]))
-    } else {
-        return None;
-    };
-
-    Some(ApplyPatchInfo {
-        source_spec,
-        target_sha1,
-        target_size,
-        source_sha1,
-        patch_file,
-    })
-}
-
-/// Parse comma-separated arguments, respecting quoted strings
-fn parse_args(content: &str) -> Vec<String> {
-    let mut args = Vec::new();
-    let mut current = String::new();
-    let mut in_quotes = false;
-    let chars = content.chars().peekable();
-
-    for c in chars {
-        match c {
-            '"' => {
-                in_quotes = !in_quotes;
-            }
-            ',' if !in_quotes => {
-                let trimmed = current.trim();
-                if !trimmed.is_empty() {
-                    // Remove surrounding quotes if present
-                    let arg = if trimmed.starts_with('"') && trimmed.ends_with('"') {
-                        trimmed[1..trimmed.len() - 1].to_string()
-                    } else {
-                        trimmed.to_string()
-                    };
-                    args.push(arg);
-                }
-                current.clear();
-            }
-            _ => {
-                current.push(c);
-            }
-        }
-    }
-
-    // Don't forget the last argument
-    let trimmed = current.trim();
-    if !trimmed.is_empty() {
-        let arg = if trimmed.starts_with('"') && trimmed.ends_with('"') {
-            trimmed[1..trimmed.len() - 1].to_string()
-        } else {
-            trimmed.to_string()
-        };
-        args.push(arg);
-    }
-
-    args
-}
-
-/// Resolve patch file path
+/// Resolve patch file path.
 fn resolve_patch_file(patch_file: &Path) -> Result<PathBuf> {
     if patch_file.exists() {
         return Ok(patch_file.to_path_buf());
@@ -243,10 +94,35 @@ fn resolve_patch_file(patch_file: &Path) -> Result<PathBuf> {
     anyhow::bail!("Patch file not found: {}", patch_file.display())
 }
 
+/// Extract a patch from an OTA zip, trying `patch/<name>` then `<name>`.
+/// Returns the filesystem path of the extracted patch.
+fn extract_patch_from_zip(ota_zip: &Path, patch_file: &Path, workdir: &Path) -> Result<PathBuf> {
+    let name = patch_file
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .context("patch file has no name")?;
+
+    let dest = workdir.join(&name);
+
+    for candidate in [format!("patch/{name}"), name.clone()] {
+        if ota::extract_from_zip(ota_zip, &candidate, &dest).is_ok() {
+            return Ok(dest);
+        }
+    }
+
+    anyhow::bail!(
+        "patch entry not found in {} (tried patch/{} and {})",
+        ota_zip.display(),
+        name,
+        name
+    )
+}
+
 /// Execute the `applypatch` subcommand.
 pub fn run(args: &ApplypatchArgs, verbose: bool) -> Result<()> {
-    // Determine if we should read from update-script
+    // Determine if we should read from update-script.
     let use_script = args.from_script
+        || args.ota.is_some()
         || (args.target_sha1.is_none() && args.target_size.is_none() && args.patch.is_none());
 
     if use_script {
@@ -295,7 +171,13 @@ fn run_from_script(args: &ApplypatchArgs, verbose: bool) -> Result<()> {
         partition_name
     );
 
-    let info = parse_apply_patch_from_script(&partition_name)?;
+    // Locate and read the script: from an OTA zip if requested, else from disk.
+    let info: ApplyPatchInfo = if let Some(ota_zip) = &args.ota {
+        let script = ota::read_update_script_from_zip(ota_zip)?;
+        ota::parse_apply_patch(&script, &partition_name)?
+    } else {
+        ota::parse_apply_patch_from_script(&partition_name)?
+    };
 
     if verbose {
         log::info!("applypatch: source={}", info.source_spec);
@@ -321,8 +203,15 @@ fn run_from_script(args: &ApplypatchArgs, verbose: bool) -> Result<()> {
         }
     };
 
-    // Resolve patch file
-    let patch_path = resolve_patch_file(&info.patch_file)?;
+    // Resolve patch file: extract from zip when an OTA package was given.
+    let patch_path = if let Some(ota_zip) = &args.ota {
+        let workdir = std::env::temp_dir().join("imgpatchtools-applypatch");
+        std::fs::create_dir_all(&workdir)
+            .with_context(|| format!("create {}", workdir.display()))?;
+        extract_patch_from_zip(ota_zip, &info.patch_file, &workdir)?
+    } else {
+        resolve_patch_file(&info.patch_file)?
+    };
 
     // Determine target path
     let target_path = if args.target.as_os_str() == "-" {

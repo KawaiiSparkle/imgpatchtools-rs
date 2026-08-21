@@ -39,7 +39,7 @@ log         = "0.4"
 env_logger  = "0.11"
 tempfile    = "3"
 rayon       = "1"
-regex       = "1"
+zip         = { version = "2", default-features = false, features = ["deflate"] }
 libz-sys    = { version = "1", features = ["static"] }
 lru         = "0.16"
 crossbeam-queue = "0.3"
