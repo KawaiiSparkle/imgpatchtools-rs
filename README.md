@@ -35,8 +35,6 @@ no complex setup required.
 | `blockimg` OTA Update | ✅ | Full/Incremental OTA, `new`/`diff`/`move` ops |
 | `applypatch` | ✅ | `bsdiff` and `imgdiff` patch application, incl. reading parameters from `update-script` or an OTA zip |
 | `batch` OTA Processing | ✅ | Sequential processing of full + incremental OTAs |
-| `imgdiff` Patch Generation | 🚧 | Not a primary focus |
-
 ✅ = Implemented & Validated · 🚧 = In Progress
 
 > **Scope note:** Logical-partition (`super.img`) tooling and the full Edify script
